@@ -54,6 +54,7 @@ describe("HomeOverviewViewStrategy security alerts", () => {
         type: "alert",
         entity: "binary_sensor.front_door",
         color: "red",
+        pulse: true,
         visibility: [
           {
             condition: "state",
