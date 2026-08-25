@@ -32,13 +32,11 @@ import type {
   HomeSummaryCard,
   MarkdownCardConfig,
   RepairsCardConfig,
-  SecurityAlertsCardConfig,
   ShortcutCardConfig,
   TileCardConfig,
   UpdatesCardConfig,
 } from "../../cards/types";
-import { computeDefaultSecurityAlertVisibility } from "../../cards/security-alerts/helpers";
-import { computeSecurityAlertCardEntityConfig } from "../../../security/strategies/security-alerts";
+import { computeSecurityAlertCardConfig } from "../../../security/strategies/security-alerts";
 import {
   LARGE_SCREEN_CONDITION,
   SMALL_SCREEN_CONDITION,
@@ -527,28 +525,39 @@ export class HomeOverviewViewStrategy extends ReactiveElement {
           }
         : undefined;
 
-    const alertEntities = config.alert_entities?.map((alertEntity) =>
-      computeSecurityAlertCardEntityConfig(
+    const alertCards = config.alert_entities?.map((alertEntity) =>
+      computeSecurityAlertCardConfig(
         hass.states[alertEntity.entity],
         alertEntity
       )
     );
 
-    const alertsSection: LovelaceSectionConfig | undefined =
-      alertEntities?.length
-        ? {
-            type: "grid",
-            column_span: maxColumns,
-            cards: [
-              {
-                type: "security-alerts",
-                alert_entities: alertEntities,
-                horizontal: true,
-                grid_options: { columns: "full" },
-              } satisfies SecurityAlertsCardConfig,
-            ],
-          }
-        : undefined;
+    const alertsSection: LovelaceSectionConfig | undefined = alertCards?.length
+      ? {
+          type: "grid",
+          column_span: maxColumns,
+          visibility: [
+            {
+              condition: "or",
+              conditions: alertCards.map((alertCard) => ({
+                condition: "and",
+                conditions: alertCard.visibility!,
+              })),
+            },
+          ],
+          cards: [
+            {
+              type: "heading",
+              heading: hass.localize(
+                "ui.panel.lovelace.strategy.security.active_alerts"
+              ),
+              heading_style: "title",
+              grid_options: { columns: "full" },
+            },
+            ...alertCards,
+          ],
+        }
+      : undefined;
 
     const emptyStateCard = {
       type: "empty-state",
@@ -602,7 +611,7 @@ export class HomeOverviewViewStrategy extends ReactiveElement {
       floorsSections.length === 0 &&
       !favoritesSection &&
       !hasVisibleSummaryCards &&
-      alertEntities?.length
+      alertCards?.length
         ? {
             type: "grid",
             column_span: maxColumns,
@@ -615,13 +624,9 @@ export class HomeOverviewViewStrategy extends ReactiveElement {
                     conditions: [
                       {
                         condition: "or",
-                        conditions: alertEntities.map((alertEntity) => ({
+                        conditions: alertCards.map((alertCard) => ({
                           condition: "and",
-                          conditions:
-                            alertEntity.visibility ??
-                            computeDefaultSecurityAlertVisibility(
-                              alertEntity.entity
-                            ),
+                          conditions: alertCard.visibility!,
                         })),
                       },
                     ],
