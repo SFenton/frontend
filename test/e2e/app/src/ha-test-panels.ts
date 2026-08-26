@@ -4,6 +4,15 @@ interface E2ETestPanelInfo extends PanelInfo {
   testSelector?: string;
 }
 
+const customPanelConfig = {
+  _panel_custom: {
+    name: "test-custom-panel",
+    module_url: "/test-custom-panel.js",
+    embed_iframe: false,
+    trust_external: true,
+  },
+};
+
 export const e2eTestPanels: Record<string, E2ETestPanelInfo> = {
   home: {
     component_name: "home",
@@ -108,6 +117,68 @@ export const e2eTestPanels: Record<string, E2ETestPanelInfo> = {
     config: { url: "/static/blank.html" },
     url_path: "iframe",
     testSelector: "ha-panel-iframe",
+  },
+  "custom-panel": {
+    component_name: "custom",
+    icon: "mdi:view-dashboard-variant",
+    title: "Custom panel",
+    config: customPanelConfig,
+    url_path: "custom-panel",
+    default_visible: true,
+    require_admin: false,
+    show_in_sidebar: true,
+    testSelector: "ha-panel-custom test-custom-panel",
+  },
+  "admin-custom-panel": {
+    component_name: "custom",
+    icon: "mdi:store",
+    title: "HACS",
+    config: customPanelConfig,
+    url_path: "admin-custom-panel",
+    default_visible: true,
+    require_admin: true,
+    show_in_sidebar: true,
+  },
+  "hidden-custom-panel": {
+    component_name: "custom",
+    icon: "mdi:eye-off",
+    title: "Hidden custom panel",
+    config: customPanelConfig,
+    url_path: "hidden-custom-panel",
+    default_visible: true,
+    require_admin: false,
+    show_in_sidebar: false,
+  },
+  "untitled-custom-panel": {
+    component_name: "custom",
+    icon: "mdi:bookmark",
+    title: null,
+    config: customPanelConfig,
+    url_path: "untitled-custom-panel",
+    default_visible: true,
+    require_admin: false,
+    show_in_sidebar: true,
+  },
+  "config-custom-panel": {
+    component_name: "custom",
+    icon: "mdi:cog",
+    title: "Config custom panel",
+    config: customPanelConfig,
+    url_path: "config-custom-panel",
+    config_panel_domain: "demo",
+    default_visible: true,
+    require_admin: true,
+    show_in_sidebar: true,
+  },
+  "test-app": {
+    component_name: "app",
+    icon: "mdi:application",
+    title: "Test app",
+    config: { addon: "test-app" },
+    url_path: "test-app",
+    default_visible: true,
+    require_admin: true,
+    show_in_sidebar: true,
   },
   config: {
     component_name: "config",

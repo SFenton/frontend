@@ -3,6 +3,8 @@ import type { ThemeSettings } from "../../../src/types";
 
 let sidebarChangeCallback: ((data: { value: unknown }) => void) | undefined;
 let themeChangeCallback: ((data: { value: ThemeSettings }) => void) | undefined;
+let userCoreChangeCallback: ((data: { value: unknown }) => void) | undefined;
+let systemCoreChangeCallback: ((data: { value: unknown }) => void) | undefined;
 
 const THEME_STORAGE_KEY = "demo_theme";
 const DEFAULT_THEME: ThemeSettings = { theme: "default", dark: false };
@@ -23,8 +25,13 @@ export const getDemoTheme = (
 };
 
 export const mockFrontend = (hass: MockHomeAssistant) => {
-  hass.mockWS("frontend/get_user_data", ({ key }) => ({
-    value: key === "theme" ? getDemoTheme() : null,
+  hass.mockWS("frontend/get_user_data", ({ key }, currentHass) => ({
+    value:
+      key === "theme"
+        ? getDemoTheme()
+        : key === "core"
+          ? currentHass.userData
+          : null,
   }));
   hass.mockWS("frontend/set_user_data", ({ key, value }) => {
     if (key === "theme") {
@@ -40,6 +47,10 @@ export const mockFrontend = (hass: MockHomeAssistant) => {
         },
       });
     }
+    if (key === "core") {
+      hass.updateHass({ userData: value });
+      userCoreChangeCallback?.({ value });
+    }
   });
   hass.mockWS("frontend/subscribe_user_data", (msg, currentHass, onChange) => {
     if (msg.key === "sidebar") {
@@ -53,6 +64,12 @@ export const mockFrontend = (hass: MockHomeAssistant) => {
       // eslint-disable-next-line @typescript-eslint/no-empty-function
       return () => {};
     }
+    if (msg.key === "core") {
+      userCoreChangeCallback = onChange;
+      onChange?.({ value: currentHass.userData });
+      // eslint-disable-next-line @typescript-eslint/no-empty-function
+      return () => {};
+    }
     onChange?.({ value: null });
     // eslint-disable-next-line @typescript-eslint/no-empty-function
     return () => {};
@@ -60,6 +77,7 @@ export const mockFrontend = (hass: MockHomeAssistant) => {
   hass.mockWS(
     "frontend/subscribe_system_data",
     (_msg, currentHass, onChange) => {
+      systemCoreChangeCallback = onChange;
       onChange?.({
         value: currentHass.systemData,
       });
@@ -67,6 +85,10 @@ export const mockFrontend = (hass: MockHomeAssistant) => {
       return () => {};
     }
   );
+  hass.mockWS("frontend/set_system_data", ({ value }) => {
+    hass.updateHass({ systemData: value });
+    systemCoreChangeCallback?.({ value });
+  });
   hass.mockWS("labs/subscribe", (_msg, _currentHass, onChange) => {
     onChange?.({
       preview_feature: _msg.preview_feature,
@@ -77,7 +99,9 @@ export const mockFrontend = (hass: MockHomeAssistant) => {
     // eslint-disable-next-line @typescript-eslint/no-empty-function
     return () => {};
   });
-  hass.mockWS("frontend/get_system_data", () => ({ value: null }));
+  hass.mockWS("frontend/get_system_data", (_msg, currentHass) => ({
+    value: currentHass.systemData,
+  }));
   hass.mockWS("repairs/list_issues", () => ({ issues: [] }));
   hass.mockWS("frontend/get_themes", (_msg, currentHass) => currentHass.themes);
 };

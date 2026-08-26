@@ -21,6 +21,22 @@ const nonAdminScenario: Scenario = async (hass) => {
   });
 };
 
+const customPanelDefaultsScenario: Scenario = async (hass) => {
+  hass.updateHass({
+    userData: {},
+    systemData: {
+      default_panel: "home",
+    },
+  });
+};
+
+const customPanelDefaultsNonAdminScenario: Scenario = async (hass) => {
+  await customPanelDefaultsScenario(hass);
+  // Keep admin-only fixtures in the panel map to exercise the frontend's
+  // defence-in-depth filter. Core removes these panels for non-admin users.
+  await nonAdminScenario(hass);
+};
+
 const darkThemeScenario: Scenario = async (hass) => {
   // Force dark mode by setting selectedTheme.dark = true.
   // _applyTheme() reads selectedTheme.dark to determine darkMode; setting
@@ -129,6 +145,8 @@ const quickSearchAssistScenario: Scenario = async (hass) => {
 export const scenarios: Record<string, Scenario> = {
   default: defaultScenario,
   "non-admin": nonAdminScenario,
+  "custom-panel-defaults": customPanelDefaultsScenario,
+  "custom-panel-defaults-non-admin": customPanelDefaultsNonAdminScenario,
   "dark-theme": darkThemeScenario,
   "custom-theme": customThemeScenario,
   "light-more-info": lightMoreInfoScenario,
