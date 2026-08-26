@@ -18,7 +18,10 @@ import type {
   LovelaceCardFeatureConfig,
   LovelaceCardFeatureContext,
 } from "../../../card-features/types";
-import type { TileCardConfig } from "../../../cards/types";
+import type {
+  PictureEntityCardConfig,
+  TileCardConfig,
+} from "../../../cards/types";
 
 export const AREA_STRATEGY_GROUPS = [
   "lights",
@@ -205,6 +208,20 @@ export const getAreaGroupedEntities = (
   ) as AreaEntitiesByGroup;
 };
 
+// Cameras are useless as a tile: the live picture is the information.
+export const computeCameraCardConfig = (
+  entity: string
+): PictureEntityCardConfig => ({
+  type: "picture-entity",
+  entity: entity,
+  show_state: false,
+  show_name: false,
+  grid_options: {
+    columns: 6,
+    rows: 2,
+  },
+});
+
 export const computeAreaTileCardConfig =
   (hass: HomeAssistant, prefix: string, includeFeature?: boolean) =>
   (entity: string): LovelaceCardConfig => {
@@ -219,16 +236,7 @@ export const computeAreaTileCardConfig =
     const domain = computeDomain(entity);
 
     if (domain === "camera") {
-      return {
-        type: "picture-entity",
-        entity: entity,
-        show_state: false,
-        show_name: false,
-        grid_options: {
-          columns: 6,
-          rows: 2,
-        },
-      };
+      return computeCameraCardConfig(entity);
     }
 
     let feature: LovelaceCardFeatureConfig | undefined;
