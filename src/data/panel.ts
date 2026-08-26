@@ -8,6 +8,7 @@ import {
   mdiPlayBoxMultiple,
   mdiTooltipAccount,
 } from "@mdi/js";
+import { stringCompare } from "../common/string/compare";
 import type { LocalizeKeys } from "../common/translations/localize";
 import type { PageNavigation } from "../layouts/hass-tabs-subpage";
 import type { HomeAssistant, PanelInfo } from "../types";
@@ -18,6 +19,15 @@ export const MY_REDIRECT_PANEL = "_my_redirect";
 export const NOT_FOUND_PANEL = "notfound";
 export const PROFILE_PANEL = "profile";
 export const LOVELACE_PANEL = "lovelace";
+
+export const PANEL_DASHBOARDS = [
+  "home",
+  "light",
+  "security",
+  "climate",
+  "energy",
+  "maintenance",
+] as string[];
 
 /** Panels that are internal/system-level and should not appear in user-facing navigation UIs. */
 export const SYSTEM_PANELS = [MY_REDIRECT_PANEL, NOT_FOUND_PANEL, APP_PANEL];
@@ -72,6 +82,30 @@ export const getPanelTitle = (
 
   return hass.localize(translationKey) || panel.title || undefined;
 };
+
+export const isCustomPanelDefaultCandidate = (panel: PanelInfo): boolean =>
+  panel.component_name === "custom" &&
+  Boolean(panel.title?.trim()) &&
+  panel.show_in_sidebar !== false &&
+  !panel.config_panel_domain;
+
+export const getSelectableCustomPanels = (
+  hass: HomeAssistant,
+  allowAdminOnly = Boolean(hass.user?.is_admin)
+): PanelInfo[] =>
+  Object.values(hass.panels)
+    .filter(
+      (panel) =>
+        isCustomPanelDefaultCandidate(panel) &&
+        (allowAdminOnly || panel.require_admin !== true)
+    )
+    .sort((a, b) =>
+      stringCompare(
+        getPanelTitle(hass, a)!,
+        getPanelTitle(hass, b)!,
+        hass.locale.language
+      )
+    );
 
 export const getPanelTitleFromUrlPath = (
   hass: HomeAssistant,
