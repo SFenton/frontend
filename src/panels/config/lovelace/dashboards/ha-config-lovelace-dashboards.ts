@@ -51,6 +51,8 @@ import {
   DEFAULT_PANEL,
   getPanelIcon,
   getPanelTitle,
+  getSelectableCustomPanels,
+  PANEL_DASHBOARDS,
   updatePanel,
 } from "../../../../data/panel";
 import {
@@ -70,23 +72,17 @@ import { showDashboardConfigureStrategyDialog } from "./show-dialog-lovelace-das
 import { showDashboardDetailDialog } from "./show-dialog-lovelace-dashboard-detail";
 import { showPanelDetailDialog } from "./show-dialog-panel-detail";
 
-export const PANEL_DASHBOARDS = [
-  "home",
-  "light",
-  "security",
-  "climate",
-  "energy",
-  "maintenance",
-] as string[];
+type DashboardType = "built_in" | "custom_panel" | "user_created";
 
 type DataTableItem = Pick<
   LovelaceDashboard,
-  "icon" | "title" | "show_in_sidebar" | "require_admin" | "mode" | "url_path"
+  "icon" | "title" | "show_in_sidebar" | "require_admin" | "url_path"
 > & {
   default: boolean;
   filename: string;
   localized_type: string;
-  type: string;
+  mode?: LovelaceDashboard["mode"];
+  type: DashboardType;
 };
 
 @customElement("ha-config-lovelace-dashboards")
@@ -231,13 +227,16 @@ export class HaConfigLovelaceDashboards extends LitElement {
         ),
         sortable: true,
         filterable: true,
-        template: (dashboard) => html`
-          ${
-            this.hass.localize(
-              `ui.panel.config.lovelace.dashboards.conf_mode.${dashboard.mode}`
-            ) || dashboard.mode
-          }
-        `,
+        template: (dashboard) =>
+          dashboard.mode
+            ? html`
+                ${
+                  this.hass.localize(
+                    `ui.panel.config.lovelace.dashboards.conf_mode.${dashboard.mode}`
+                  ) || dashboard.mode
+                }
+              `
+            : html`—`,
       };
       if (dashboards.some((dashboard) => dashboard.filename)) {
         columns.filename = {
@@ -340,7 +339,9 @@ export class HaConfigLovelaceDashboards extends LitElement {
     (
       dashboards: LovelaceDashboard[],
       defaultUrlPath: string | null,
-      panels: HomeAssistant["panels"]
+      panels: HomeAssistant["panels"],
+      _language: string,
+      allowAdminOnly: boolean
     ) => {
       const result: DataTableItem[] = [];
 
@@ -365,6 +366,23 @@ export class HaConfigLovelaceDashboards extends LitElement {
       });
 
       result.push(
+        ...getSelectableCustomPanels(this.hass, allowAdminOnly).map(
+          (panelInfo) =>
+            ({
+              icon: getPanelIcon(panelInfo),
+              title: getPanelTitle(this.hass, panelInfo) || panelInfo.url_path,
+              show_in_sidebar: panelInfo.show_in_sidebar || false,
+              url_path: panelInfo.url_path,
+              filename: "",
+              default: defaultUrlPath === panelInfo.url_path,
+              require_admin: panelInfo.require_admin || false,
+              type: "custom_panel",
+              localized_type: this._localizeType("custom_panel"),
+            }) satisfies DataTableItem
+        )
+      );
+
+      result.push(
         ...dashboards
           .sort((a, b) =>
             stringCompare(a.title, b.title, this.hass.locale.language)
@@ -384,7 +402,7 @@ export class HaConfigLovelaceDashboards extends LitElement {
     }
   );
 
-  private _localizeType = (type: "user_created" | "built_in") =>
+  private _localizeType = (type: DashboardType) =>
     this.hass.localize(
       `ui.panel.config.lovelace.dashboards.picker.type.${type}`
     );
@@ -412,7 +430,9 @@ export class HaConfigLovelaceDashboards extends LitElement {
         .data=${this._getItems(
           this._dashboards,
           defaultPanel,
-          this.hass.panels
+          this.hass.panels,
+          this.hass.locale.language,
+          Boolean(this.hass.user?.is_admin)
         )}
         .initialGroupColumn=${this._activeGrouping}
         .initialCollapsedGroups=${this._activeCollapsed}
