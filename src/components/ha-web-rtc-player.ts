@@ -72,6 +72,8 @@ class HaWebRtcPlayer extends LitElement {
 
   private _readyConnection?: Connection;
 
+  private _timerRunning = false;
+
   private _handleVisibilityChange = () => {
     if (document.pictureInPictureElement) {
       // video is playing in picture-in-picture mode, don't do anything
@@ -85,6 +87,12 @@ class HaWebRtcPlayer extends LitElement {
   };
 
   private _handleConnectionReady = () => {
+    if (document.hidden) {
+      clearTimeout(this._hiddenCleanupTimeout);
+      this._hiddenCleanupTimeout = undefined;
+      this._cleanUp();
+      return;
+    }
     this._startWebRtc();
   };
 
@@ -245,50 +253,59 @@ class HaWebRtcPlayer extends LitElement {
   }
 
   private _startNegotiation = async () => {
-    if (!this._peerConnection) {
+    const peerConnection = this._peerConnection;
+    const startGeneration = this._startGeneration;
+    if (!peerConnection) {
       return;
     }
-
-    const offerOptions: RTCOfferOptions = {
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: true,
-    };
-
-    this._logEvent("start createOffer", offerOptions);
-
-    const offer: RTCSessionDescriptionInit =
-      await this._peerConnection.createOffer(offerOptions);
-
-    if (!this._peerConnection) {
-      return;
-    }
-
-    this._logEvent("end createOffer", offer);
-
-    this._logEvent("start setLocalDescription");
-
-    await this._peerConnection.setLocalDescription(offer);
-
-    if (!this._peerConnection || !this.entityid) {
-      return;
-    }
-
-    this._logEvent("end setLocalDescription");
-
-    let candidates = "";
-
-    while (this._candidatesList.length) {
-      const candidate = this._candidatesList.pop();
-      if (candidate) {
-        candidates += `a=${candidate}\r\n`;
-      }
-    }
-
-    const offer_sdp = offer.sdp! + candidates;
-
-    this._logEvent("start webRtcOffer", offer_sdp);
 
     try {
+      const offerOptions: RTCOfferOptions = {
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      };
+
+      this._logEvent("start createOffer", offerOptions);
+
+      const offer: RTCSessionDescriptionInit =
+        await peerConnection.createOffer(offerOptions);
+
+      if (
+        startGeneration !== this._startGeneration ||
+        peerConnection !== this._peerConnection
+      ) {
+        return;
+      }
+
+      this._logEvent("end createOffer", offer);
+
+      this._logEvent("start setLocalDescription");
+
+      await peerConnection.setLocalDescription(offer);
+
+      if (
+        startGeneration !== this._startGeneration ||
+        peerConnection !== this._peerConnection ||
+        !this.entityid
+      ) {
+        return;
+      }
+
+      this._logEvent("end setLocalDescription");
+
+      let candidates = "";
+
+      while (this._candidatesList.length) {
+        const candidate = this._candidatesList.pop();
+        if (candidate) {
+          candidates += `a=${candidate}\r\n`;
+        }
+      }
+
+      const offer_sdp = offer.sdp! + candidates;
+
+      this._logEvent("start webRtcOffer", offer_sdp);
+
       this._unsub = webRtcOffer(
         this._connection,
         this.entityid,
@@ -296,6 +313,9 @@ class HaWebRtcPlayer extends LitElement {
         (event) => this._handleOfferEvent(event)
       );
     } catch (err: any) {
+      if (startGeneration !== this._startGeneration) {
+        return;
+      }
       this._error = "Failed to start WebRTC stream: " + err.message;
       this._cleanUp();
     }
@@ -451,12 +471,12 @@ class HaWebRtcPlayer extends LitElement {
       this._peerConnection = undefined;
 
       this._logEvent("stopped");
-      this._stopTimer();
     }
     this._unsub?.then((unsub) => unsub()).catch(() => undefined);
     this._unsub = undefined;
     this._sessionId = undefined;
     this._candidatesList = [];
+    this._stopTimer();
   }
 
   private _loadedData() {
@@ -476,19 +496,21 @@ class HaWebRtcPlayer extends LitElement {
   }
 
   private _startTimer() {
-    if (!__DEV__) {
+    if (!__DEV__ || this._timerRunning) {
       return;
     }
     // eslint-disable-next-line no-console
     console.time("WebRTC");
+    this._timerRunning = true;
   }
 
   private _stopTimer() {
-    if (!__DEV__) {
+    if (!__DEV__ || !this._timerRunning) {
       return;
     }
     // eslint-disable-next-line no-console
     console.timeEnd("WebRTC");
+    this._timerRunning = false;
   }
 
   private _logEvent(msg: string, ...args: unknown[]) {

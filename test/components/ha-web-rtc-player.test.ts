@@ -32,6 +32,15 @@ class MockRTCPeerConnection {
 
   public addTransceiver = vi.fn();
 
+  public createOffer = vi.fn().mockResolvedValue({
+    type: "offer",
+    sdp: "v=0\r\n",
+  });
+
+  public setLocalDescription = vi.fn().mockImplementation(async () => {
+    this.signalingState = "have-local-offer";
+  });
+
   public restartIce = vi.fn();
 
   public signalingState: RTCSignalingState = "stable";
@@ -113,6 +122,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// Reconnect recovery must replace the expired peer negotiation without
+// depending on the player being removed and recreated by its parent.
 describe("ha-web-rtc-player reconnect handling", () => {
   it("restarts the peer connection when Home Assistant reconnects", async () => {
     const { connection, player } = await mountPlayer();
@@ -192,5 +203,50 @@ describe("ha-web-rtc-player reconnect handling", () => {
     await Promise.resolve();
 
     expect(MockRTCPeerConnection.instances).toHaveLength(1);
+  });
+
+  it("does not apply a stale negotiation to the replacement peer", async () => {
+    const { connection } = await mountPlayer();
+    const firstPeer = MockRTCPeerConnection.instances[0];
+    let resolveOffer!: (offer: RTCSessionDescriptionInit) => void;
+    firstPeer.createOffer.mockReturnValueOnce(
+      new Promise<RTCSessionDescriptionInit>((resolve) => {
+        resolveOffer = resolve;
+      })
+    );
+
+    const negotiation = firstPeer.onnegotiationneeded?.call(
+      firstPeer as unknown as RTCPeerConnection,
+      new Event("negotiationneeded")
+    );
+    connection.dispatchEvent(new Event("ready"));
+    await vi.waitFor(() =>
+      expect(MockRTCPeerConnection.instances).toHaveLength(2)
+    );
+
+    resolveOffer({ type: "offer", sdp: "v=0\r\n" });
+    await negotiation;
+
+    expect(firstPeer.setLocalDescription).not.toHaveBeenCalled();
+    expect(
+      MockRTCPeerConnection.instances[1].setLocalDescription
+    ).not.toHaveBeenCalled();
+  });
+
+  it("waits until the document is visible to restart", async () => {
+    const { connection } = await mountPlayer();
+    const firstPeer = MockRTCPeerConnection.instances[0];
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+
+    connection.dispatchEvent(new Event("ready"));
+    await vi.waitFor(() => expect(firstPeer.close).toHaveBeenCalledOnce());
+    expect(fetchWebRtcClientConfiguration).toHaveBeenCalledOnce();
+
+    hidden.mockReturnValue(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.waitFor(() => {
+      expect(fetchWebRtcClientConfiguration).toHaveBeenCalledTimes(2);
+      expect(MockRTCPeerConnection.instances).toHaveLength(2);
+    });
   });
 });
