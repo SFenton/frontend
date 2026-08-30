@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reconnect iframe fixture</title>
+  </head>
+  <body>
+    <label>
+      Preserved value
+      <input id="preserved-value" />
+    </label>
+    <script>
+      window.parent.__reconnectIframeLoads =
+        (window.parent.__reconnectIframeLoads ?? 0) + 1;
+    </script>
+  </body>
+</html>

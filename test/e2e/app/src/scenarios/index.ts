@@ -204,6 +204,73 @@ const delayedLovelaceScenario: Scenario = (hass) => {
   hass.mockWS("lovelace/config", () => configPromise);
 };
 
+const reconnectIframeScenario: Scenario = (hass) => {
+  class ReconnectProbeCard extends HTMLElement {
+    constructor() {
+      super();
+      window.__reconnectProbeConstructed =
+        (window.__reconnectProbeConstructed ?? 0) + 1;
+    }
+
+    public connectedCallback(): void {
+      window.__reconnectProbeConnected =
+        (window.__reconnectProbeConnected ?? 0) + 1;
+    }
+
+    public disconnectedCallback(): void {
+      window.__reconnectProbeDisconnected =
+        (window.__reconnectProbeDisconnected ?? 0) + 1;
+    }
+
+    public setConfig(config: { label: string }): void {
+      window.__reconnectProbeConfigured =
+        (window.__reconnectProbeConfigured ?? 0) + 1;
+      this.textContent = config.label;
+    }
+
+    public getCardSize(): number {
+      return 1;
+    }
+  }
+
+  if (!customElements.get("reconnect-probe-card")) {
+    customElements.define("reconnect-probe-card", ReconnectProbeCard);
+  }
+
+  let changed = false;
+  window.__lovelaceReconnectFetches = 0;
+  window.__reconnectIframeLoads = 0;
+  window.__reconnectProbeConfigured = 0;
+  window.__reconnectProbeConnected = 0;
+  window.__reconnectProbeConstructed = 0;
+  window.__reconnectProbeDisconnected = 0;
+  window.useChangedLovelaceConfig = () => {
+    changed = true;
+  };
+  hass.mockWS("lovelace/config", () => {
+    window.__lovelaceReconnectFetches =
+      (window.__lovelaceReconnectFetches ?? 0) + 1;
+    return structuredClone({
+      views: [
+        {
+          title: "Reconnect",
+          cards: [
+            {
+              type: "iframe",
+              url: `/reconnect-iframe.html?version=${changed ? 2 : 1}`,
+              aspect_ratio: "100%",
+            },
+            {
+              type: "custom:reconnect-probe-card",
+              label: changed ? "Changed" : "Initial",
+            },
+          ],
+        },
+      ],
+    } satisfies LovelaceRawConfig);
+  });
+};
+
 const delayedGeneratedDashboardScenario: Scenario = (hass) => {
   addLaunchScreen();
 
@@ -305,4 +372,5 @@ export const scenarios: Record<string, Scenario> = {
   "weather-more-info": weatherMoreInfoScenario,
   "quick-search-assist": quickSearchAssistScenario,
   "delayed-lovelace": delayedLovelaceScenario,
+  "reconnect-iframe": reconnectIframeScenario,
 };
