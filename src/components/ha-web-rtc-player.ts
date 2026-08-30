@@ -1,5 +1,5 @@
 import { consume, type ContextType } from "@lit/context";
-import type { UnsubscribeFunc } from "home-assistant-js-websocket";
+import type { Connection, UnsubscribeFunc } from "home-assistant-js-websocket";
 import type { PropertyValues, TemplateResult } from "lit";
 import { css, html, LitElement } from "lit";
 import { customElement, property, query, state } from "lit/decorators";
@@ -72,6 +72,10 @@ class HaWebRtcPlayer extends LitElement {
 
   private _hiddenCleanupTimeout?: number;
 
+  private _startGeneration = 0;
+
+  private _readyConnection?: Connection;
+
   private _handleVisibilityChange = () => {
     if (document.pictureInPictureElement) {
       // video is playing in picture-in-picture mode, don't do anything
@@ -89,6 +93,10 @@ class HaWebRtcPlayer extends LitElement {
     } else {
       this._startWebRtc();
     }
+  };
+
+  private _handleConnectionReady = () => {
+    this._startWebRtc();
   };
 
   protected override render(): TemplateResult {
@@ -118,6 +126,7 @@ class HaWebRtcPlayer extends LitElement {
     if (this.hasUpdated && this.entityid) {
       this._startWebRtc();
     }
+    this._attachReadyListener();
     document.addEventListener("visibilitychange", this._handleVisibilityChange);
   }
 
@@ -127,21 +136,48 @@ class HaWebRtcPlayer extends LitElement {
       "visibilitychange",
       this._handleVisibilityChange
     );
+    this._detachReadyListener();
     clearTimeout(this._hiddenCleanupTimeout);
     this._hiddenCleanupTimeout = undefined;
     this._cleanUp();
   }
 
-  protected override willUpdate(changedProperties: PropertyValues<this>) {
+  protected override willUpdate(changedProperties: PropertyValues) {
     super.willUpdate(changedProperties);
+    if (changedProperties.has("_connection")) {
+      this._attachReadyListener();
+    }
     if (!changedProperties.has("entityid")) {
       return;
     }
     this._startWebRtc();
   }
 
+  private _attachReadyListener(): void {
+    const connection = this._connection?.connection;
+    if (
+      !this.isConnected ||
+      !connection ||
+      connection === this._readyConnection
+    ) {
+      return;
+    }
+    this._detachReadyListener();
+    connection.addEventListener("ready", this._handleConnectionReady);
+    this._readyConnection = connection;
+  }
+
+  private _detachReadyListener(): void {
+    this._readyConnection?.removeEventListener(
+      "ready",
+      this._handleConnectionReady
+    );
+    this._readyConnection = undefined;
+  }
+
   private async _startWebRtc(): Promise<void> {
     this._cleanUp();
+    const startGeneration = this._startGeneration;
 
     // Browser support required for WebRTC
     if (typeof RTCPeerConnection === "undefined") {
@@ -160,10 +196,26 @@ class HaWebRtcPlayer extends LitElement {
 
     this._logEvent("start clientConfig");
 
-    this._clientConfig = await fetchWebRtcClientConfiguration(
-      this._api,
-      this.entityid
-    );
+    let clientConfig: WebRTCClientConfiguration;
+    try {
+      clientConfig = await fetchWebRtcClientConfiguration(
+        this._api,
+        this.entityid
+      );
+    } catch (err: any) {
+      if (startGeneration !== this._startGeneration || !this.isConnected) {
+        return;
+      }
+      this._error = "Failed to load WebRTC configuration: " + err.message;
+      this._cleanUp();
+      return;
+    }
+
+    if (startGeneration !== this._startGeneration || !this.isConnected) {
+      return;
+    }
+
+    this._clientConfig = clientConfig;
 
     this._logEvent("end clientConfig", this._clientConfig);
 
@@ -383,6 +435,8 @@ class HaWebRtcPlayer extends LitElement {
   }
 
   private _cleanUp() {
+    this._startGeneration += 1;
+
     if (this._remoteStream) {
       this._remoteStream.getTracks().forEach((track) => {
         track.stop();
@@ -412,7 +466,7 @@ class HaWebRtcPlayer extends LitElement {
       this._logEvent("stopped");
       this._stopTimer();
     }
-    this._unsub?.then((unsub) => unsub());
+    this._unsub?.then((unsub) => unsub()).catch(() => undefined);
     this._unsub = undefined;
     this._sessionId = undefined;
     this._candidatesList = [];
