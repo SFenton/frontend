@@ -4,6 +4,7 @@ import type { PropertyValues, TemplateResult } from "lit";
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators";
 import memoizeOne from "memoize-one";
+import type { HASSDomEvent } from "../../common/dom/fire_event";
 import { navigate } from "../../common/navigate";
 import type { LocalizeFunc } from "../../common/translations/localize";
 import { constructUrlCurrentPath } from "../../common/url/construct-url";
@@ -12,9 +13,12 @@ import {
   removeSearchParam,
 } from "../../common/url/search-params";
 import { debounce } from "../../common/util/debounce";
+import { deepEqual } from "../../common/util/deep-equal";
 import "../../components/ha-button";
+import type { ConnectionStatus } from "../../data/connection-status";
 import { domainToName } from "../../data/integration";
 import { subscribeLovelaceUpdates } from "../../data/lovelace";
+import { isStrategySection } from "../../data/lovelace/config/section";
 import type {
   LovelaceConfig,
   LovelaceRawConfig,
@@ -24,6 +28,7 @@ import {
   isStrategyDashboard,
   saveConfig,
 } from "../../data/lovelace/config/types";
+import { isStrategyView } from "../../data/lovelace/config/view";
 import { fetchResources } from "../../data/lovelace/resource";
 import type { WindowWithPreloads } from "../../data/preloads";
 import "../../layouts/hass-error-screen";
@@ -49,8 +54,22 @@ interface LovelacePanelConfig {
   mode: "yaml" | "storage";
 }
 
+interface FetchConfigOptions {
+  clearPendingUpdate?: boolean;
+  preserveIfUnchanged?: boolean;
+}
+
 let editorLoaded = false;
 let resourcesLoaded = false;
+
+const hasStrategy = (config: LovelaceRawConfig): boolean =>
+  isStrategyDashboard(config) ||
+  (config.views?.some(
+    (view) =>
+      isStrategyView(view) ||
+      Boolean(view.sections?.some((section) => isStrategySection(section)))
+  ) ??
+    false);
 
 @customElement("ha-panel-lovelace")
 export class LovelacePanel extends LitElement {
@@ -94,7 +113,10 @@ export class LovelacePanel extends LitElement {
       );
     } else if (this._fetchConfigOnConnect) {
       // Config was changed when we were not at the lovelace panel
-      this._fetchConfig(false);
+      this._fetchConfig(false, {
+        clearPendingUpdate: true,
+        preserveIfUnchanged: true,
+      });
     }
     window.addEventListener("connection-status", this._handleConnectionStatus);
   }
@@ -230,10 +252,12 @@ export class LovelacePanel extends LitElement {
     }
   }
 
-  private _handleConnectionStatus = (ev) => {
+  private _handleConnectionStatus = (
+    ev: HASSDomEvent<ConnectionStatus>
+  ): void => {
     // reload lovelace on reconnect so we are sure we have the latest config
     if (ev.detail === "connected") {
-      this._fetchConfig(false);
+      this._fetchConfig(false, { preserveIfUnchanged: true });
     }
   };
 
@@ -285,7 +309,13 @@ export class LovelacePanel extends LitElement {
     this._fetchConfig(true);
   }
 
-  private async _fetchConfig(forceDiskRefresh: boolean) {
+  private async _fetchConfig(
+    forceDiskRefresh: boolean,
+    {
+      clearPendingUpdate = false,
+      preserveIfUnchanged = false,
+    }: FetchConfigOptions = {}
+  ) {
     this._loading = true;
 
     let conf: LovelaceConfig;
@@ -373,7 +403,15 @@ export class LovelacePanel extends LitElement {
 
     this._panelState =
       this._panelState === "yaml-editor" ? this._panelState : "loaded";
-    this._setLovelaceConfig(conf, rawConf, confMode);
+    this._setLovelaceConfig(
+      conf,
+      rawConf,
+      confMode,
+      preserveIfUnchanged && !forceDiskRefresh
+    );
+    if (clearPendingUpdate) {
+      this._fetchConfigOnConnect = false;
+    }
   }
 
   private _checkLovelaceConfig(config: LovelaceRawConfig) {
@@ -384,9 +422,24 @@ export class LovelacePanel extends LitElement {
   private _setLovelaceConfig(
     config: LovelaceConfig,
     rawConfig: LovelaceRawConfig,
-    mode: Lovelace["mode"]
+    mode: Lovelace["mode"],
+    preserveIfUnchanged = false
   ) {
     config = this._checkLovelaceConfig(config);
+    // A reconnect returns fresh objects even when the dashboard is unchanged.
+    // Keep the existing tree so stateful cards and iframes remain mounted.
+    if (
+      preserveIfUnchanged &&
+      this.lovelace &&
+      this.lovelace.urlPath === this.urlPath &&
+      this.lovelace.mode === mode &&
+      this.lovelace.locale === this.hass!.locale &&
+      !hasStrategy(rawConfig) &&
+      deepEqual(this.lovelace.rawConfig, rawConfig) &&
+      deepEqual(this.lovelace.config, config)
+    ) {
+      return;
+    }
     const urlPath = this.urlPath;
     this.lovelace = {
       config,

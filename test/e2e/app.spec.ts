@@ -79,6 +79,14 @@ const clickFirstDashboardRowMenuItem = async (menu: Locator) => {
   });
 };
 
+const reconnectProbeCounts = (page: Page) =>
+  page.evaluate(() => ({
+    configured: window.__reconnectProbeConfigured,
+    connected: window.__reconnectProbeConnected,
+    constructed: window.__reconnectProbeConstructed,
+    disconnected: window.__reconnectProbeDisconnected,
+  }));
+
 // ---------------------------------------------------------------------------
 // App shell
 // ---------------------------------------------------------------------------
@@ -302,6 +310,92 @@ test.describe("Custom panel defaults", () => {
         )
       )
       .not.toBe("admin-custom-panel");
+  });
+});
+
+test.describe("Lovelace reconnect lifecycle", () => {
+  test("preserves iframe state when the dashboard config is unchanged", async ({
+    page,
+  }) => {
+    await goToPanel(page, "/?scenario=reconnect-iframe#/lovelace");
+
+    const iframe = page.locator("hui-iframe-card iframe").first();
+    await expect(iframe).toBeAttached({ timeout: PANEL_TIMEOUT });
+    await expect
+      .poll(() => page.evaluate(() => window.__reconnectIframeLoads))
+      .toBe(1);
+    await expect
+      .poll(() => reconnectProbeCounts(page))
+      .toEqual({
+        configured: 1,
+        connected: 1,
+        constructed: 1,
+        disconnected: 0,
+      });
+
+    await page
+      .frameLocator("hui-iframe-card iframe")
+      .locator("#preserved-value")
+      .fill("still here");
+    await iframe.evaluate((element) => {
+      window.__reconnectIframeElement = element as HTMLIFrameElement;
+      window.__reconnectIframeWindow = (
+        element as HTMLIFrameElement
+      ).contentWindow;
+    });
+
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new CustomEvent("connection-status", { detail: "connected" })
+      );
+    });
+    await expect
+      .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
+      .toBe(2);
+
+    await expect(
+      page.frameLocator("hui-iframe-card iframe").locator("#preserved-value")
+    ).toHaveValue("still here");
+    expect(await page.evaluate(() => window.__reconnectIframeLoads)).toBe(1);
+    await expect
+      .poll(() => reconnectProbeCounts(page))
+      .toEqual({
+        configured: 1,
+        connected: 1,
+        constructed: 1,
+        disconnected: 0,
+      });
+    expect(
+      await iframe.evaluate(
+        (element) =>
+          window.__reconnectIframeElement === element &&
+          window.__reconnectIframeWindow ===
+            (element as HTMLIFrameElement).contentWindow
+      )
+    ).toBe(true);
+
+    await page.evaluate(() => {
+      window.useChangedLovelaceConfig?.();
+      window.dispatchEvent(
+        new CustomEvent("connection-status", { detail: "connected" })
+      );
+    });
+    await expect
+      .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
+      .toBe(3);
+    expect(
+      await iframe.evaluate(
+        (element) => window.__reconnectIframeElement === element
+      )
+    ).toBe(false);
+    await expect
+      .poll(() => reconnectProbeCounts(page))
+      .toEqual({
+        configured: 2,
+        connected: 2,
+        constructed: 2,
+        disconnected: 1,
+      });
   });
 });
 

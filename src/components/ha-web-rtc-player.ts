@@ -88,8 +88,6 @@ class HaWebRtcPlayer extends LitElement {
 
   private _handleConnectionReady = () => {
     if (document.hidden) {
-      clearTimeout(this._hiddenCleanupTimeout);
-      this._hiddenCleanupTimeout = undefined;
       this._cleanUp();
       return;
     }
