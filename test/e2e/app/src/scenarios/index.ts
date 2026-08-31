@@ -15,6 +15,34 @@ export type Scenario = (hass: MockHomeAssistant) => Promise<void> | void;
 
 // ── Individual scenarios ───────────────────────────────────────────────────
 
+class ReconnectProbeCard extends HTMLElement {
+  constructor() {
+    super();
+    window.__reconnectProbeConstructed =
+      (window.__reconnectProbeConstructed ?? 0) + 1;
+  }
+
+  public connectedCallback(): void {
+    window.__reconnectProbeConnected =
+      (window.__reconnectProbeConnected ?? 0) + 1;
+  }
+
+  public disconnectedCallback(): void {
+    window.__reconnectProbeDisconnected =
+      (window.__reconnectProbeDisconnected ?? 0) + 1;
+  }
+
+  public setConfig(config: { label: string }): void {
+    window.__reconnectProbeConfigured =
+      (window.__reconnectProbeConfigured ?? 0) + 1;
+    this.textContent = config.label;
+  }
+
+  public getCardSize(): number {
+    return 1;
+  }
+}
+
 const defaultScenario: Scenario = async (_hass) => {
   // Default: admin user, light theme — nothing extra to do, ha-test.ts sets
   // everything up already.
@@ -205,38 +233,20 @@ const delayedLovelaceScenario: Scenario = (hass) => {
 };
 
 const reconnectIframeScenario: Scenario = (hass) => {
-  class ReconnectProbeCard extends HTMLElement {
-    constructor() {
-      super();
-      window.__reconnectProbeConstructed =
-        (window.__reconnectProbeConstructed ?? 0) + 1;
-    }
-
-    public connectedCallback(): void {
-      window.__reconnectProbeConnected =
-        (window.__reconnectProbeConnected ?? 0) + 1;
-    }
-
-    public disconnectedCallback(): void {
-      window.__reconnectProbeDisconnected =
-        (window.__reconnectProbeDisconnected ?? 0) + 1;
-    }
-
-    public setConfig(config: { label: string }): void {
-      window.__reconnectProbeConfigured =
-        (window.__reconnectProbeConfigured ?? 0) + 1;
-      this.textContent = config.label;
-    }
-
-    public getCardSize(): number {
-      return 1;
-    }
-  }
-
   if (!customElements.get("reconnect-probe-card")) {
     customElements.define("reconnect-probe-card", ReconnectProbeCard);
   }
 
+  const iframeUrls = [1, 2].map((version) =>
+    URL.createObjectURL(
+      new Blob(
+        [
+          `<!doctype html><html><body><label>Preserved value <input id="preserved-value"></label><span>${version}</span><script>window.parent.__reconnectIframeLoads = (window.parent.__reconnectIframeLoads ?? 0) + 1;</script></body></html>`,
+        ],
+        { type: "text/html" }
+      )
+    )
+  );
   let changed = false;
   window.__lovelaceReconnectFetches = 0;
   window.__reconnectIframeLoads = 0;
@@ -257,7 +267,7 @@ const reconnectIframeScenario: Scenario = (hass) => {
           cards: [
             {
               type: "iframe",
-              url: `/reconnect-iframe.html?version=${changed ? 2 : 1}`,
+              url: iframeUrls[changed ? 1 : 0],
               aspect_ratio: "100%",
             },
             {
@@ -374,3 +384,9 @@ export const scenarios: Record<string, Scenario> = {
   "delayed-lovelace": delayedLovelaceScenario,
   "reconnect-iframe": reconnectIframeScenario,
 };
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "reconnect-probe-card": ReconnectProbeCard;
+  }
+}

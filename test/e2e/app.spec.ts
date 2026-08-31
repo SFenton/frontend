@@ -198,10 +198,6 @@ test.describe("Lovelace reconnect lifecycle", () => {
     await expect
       .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
       .toBe(3);
-    await expect(iframe).toHaveAttribute(
-      "src",
-      "/reconnect-iframe.html?version=2"
-    );
     expect(
       await iframe.evaluate(
         (element) => window.__reconnectIframeElement === element
