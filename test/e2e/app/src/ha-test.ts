@@ -92,6 +92,24 @@ declare global {
   interface Window {
     __assistRun?: unknown;
     __mockHass: MockHomeAssistant;
+    __lovelaceReconnectFetches?: number;
+    __reconnectIframeElement?: HTMLIFrameElement;
+    __reconnectIframeLoads?: number;
+    __reconnectIframeWindow?: Window | null;
+    __reconnectProbeConfigured?: number;
+    __reconnectProbeConnected?: number;
+    __reconnectProbeConstructed?: number;
+    __reconnectProbeDisconnected?: number;
+    __reconnectSidebarGenerations?: number;
+    deferLovelaceConfig?: () => void;
+    useChangedLovelaceConfig?: () => void;
+    rejectMediaBrowse?: () => void;
+    resolveCalendarRegistry?: () => void;
+    resolveConfigEntries?: () => void;
+    resolveConfigEntriesInProgress?: () => void;
+    resolveGeneratedDashboard?: () => void;
+    resolveLovelaceConfig?: () => void;
+    resolveMediaBrowse?: () => void;
   }
 }
 
@@ -180,6 +198,7 @@ export class HaTest extends HomeAssistantAppEl {
             disabled_by: null,
             domain: entry.domain,
             entry_id: entry.entry_id,
+            error_reason_translation_domain: null,
             error_reason_translation_key: null,
             error_reason_translation_placeholders: null,
             num_subentries: 0,
@@ -240,16 +259,12 @@ export class HaTest extends HomeAssistantAppEl {
     window.__mockHass = hass;
 
     // SPA navigation
-    document.body.addEventListener(
-      "click",
-      (e) => {
-        const href = isNavigationClick(e);
-        if (!href) return;
-        e.preventDefault();
+    window.addEventListener("click", (e) => {
+      const href = isNavigationClick(e);
+      if (href) {
         navigate(href);
-      },
-      { capture: true }
-    );
+      }
+    });
 
     this.hassConnected();
   }

@@ -147,6 +147,10 @@ export const AutomationScriptEditorMixin = <TConfig extends BaseEditorConfig>(
 
     protected domainHooks!: EditorDomainHooks<TConfig>;
 
+    protected get dashboardPath(): string {
+      return `/config/${this.domainHooks.domain}/dashboard`;
+    }
+
     protected entityRegCreated?: (
       value: PromiseLike<EntityRegistryEntry> | EntityRegistryEntry
     ) => void;
@@ -252,7 +256,7 @@ export const AutomationScriptEditorMixin = <TConfig extends BaseEditorConfig>(
     protected backTapped = async () => {
       const result = await this.confirmUnsavedChanged();
       if (result) {
-        afterNextRender(() => goBack("/config"));
+        afterNextRender(() => goBack(this.dashboardPath));
       }
     };
 
@@ -274,6 +278,9 @@ export const AutomationScriptEditorMixin = <TConfig extends BaseEditorConfig>(
       const domain = hooks.domain;
       try {
         const config = await hooks.fetchFileConfig(this.hass, id);
+        if (!this.isConnected) {
+          return;
+        }
         this.readOnly = false;
         const report: AutomationMigrationReport = { deprecated: false };
         this.config = hooks.normalizeConfig(config, report);
@@ -290,6 +297,9 @@ export const AutomationScriptEditorMixin = <TConfig extends BaseEditorConfig>(
         );
         hooks.checkValidation();
       } catch (err: any) {
+        if (!this.isConnected) {
+          return;
+        }
         if (err.status_code !== 404) {
           const alertText =
             err.body?.message || err.body || err.error || "Unknown error";
@@ -300,7 +310,7 @@ export const AutomationScriptEditorMixin = <TConfig extends BaseEditorConfig>(
             ),
             text: html`<pre>${alertText}</pre>`,
           });
-          goBack("/config");
+          goBack(this.dashboardPath);
           return;
         }
         const entity = this.entityRegistry?.find(
@@ -317,7 +327,7 @@ export const AutomationScriptEditorMixin = <TConfig extends BaseEditorConfig>(
             `ui.panel.config.${domain}.editor.load_error_not_editable`
           ),
         });
-        goBack("/config");
+        goBack(this.dashboardPath);
       }
     }
   }

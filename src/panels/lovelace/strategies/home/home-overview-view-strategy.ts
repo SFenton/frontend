@@ -9,6 +9,7 @@ import {
 } from "../../../../common/entity/entity_filter";
 import { floorDefaultIcon } from "../../../../components/ha-floor-icon";
 import type { AreaRegistryEntry } from "../../../../data/area/area_registry";
+import type { EnergyPreferences } from "../../../../data/energy";
 import { getEnergyPreferences } from "../../../../data/energy";
 import type { LovelaceCardConfig } from "../../../../data/lovelace/config/card";
 import type {
@@ -20,6 +21,7 @@ import type { LovelaceViewConfig } from "../../../../data/lovelace/config/view";
 import type { ShortcutItem } from "../../../../data/home_shortcuts";
 import { resolveShortcutItems } from "../../../../data/home_shortcuts";
 import type { HomeAssistant } from "../../../../types";
+import { hasClimateEntities } from "../../../climate/strategies/climate-view-strategy";
 import type {
   AreaCardConfig,
   DiscoveredDevicesCardConfig,
@@ -32,6 +34,7 @@ import type {
   TileCardConfig,
   UpdatesCardConfig,
 } from "../../cards/types";
+import { computeFavoriteCardConfig } from "../helpers/favorite-cards";
 import {
   LARGE_SCREEN_CONDITION,
   SMALL_SCREEN_CONDITION,
@@ -49,6 +52,26 @@ export interface HomeOverviewViewStrategyConfig {
   hide_suggested_entities?: boolean;
   shortcuts?: ShortcutItem[];
 }
+
+const energyPreferencesPromises = new WeakMap<
+  HomeAssistant["connection"],
+  Promise<EnergyPreferences | undefined>
+>();
+
+export const preloadHomeEnergyPreferences = (hass: HomeAssistant) => {
+  if (!isComponentLoaded(hass.config, "energy")) {
+    return Promise.resolve(undefined);
+  }
+
+  const existing = energyPreferencesPromises.get(hass.connection);
+  if (existing) {
+    return existing;
+  }
+
+  const request = getEnergyPreferences(hass).catch(() => undefined);
+  energyPreferencesPromises.set(hass.connection, request);
+  return request;
+};
 
 const computeAreaCard = (
   areaId: string,
@@ -249,15 +272,7 @@ export class HomeOverviewViewStrategy extends ReactiveElement {
         column_span: maxColumns,
         cards: [
           favoritesHeadingCard,
-          ...favoriteEntities.map(
-            (entityId) =>
-              ({
-                type: "tile",
-                entity: entityId,
-                state_content: ["state", "area_name"],
-                show_entity_picture: true,
-              }) satisfies TileCardConfig
-          ),
+          ...favoriteEntities.map(computeFavoriteCardConfig),
         ],
       };
     }
@@ -267,10 +282,6 @@ export class HomeOverviewViewStrategy extends ReactiveElement {
     );
 
     const lightsFilters = HOME_SUMMARIES_FILTERS.light.map((filter) =>
-      generateEntityFilter(hass, filter)
-    );
-
-    const climateFilters = HOME_SUMMARIES_FILTERS.climate.map((filter) =>
       generateEntityFilter(hass, filter)
     );
 
@@ -286,9 +297,7 @@ export class HomeOverviewViewStrategy extends ReactiveElement {
       hass.panels.light && findEntities(allEntities, lightsFilters).length > 0;
     const hasMediaPlayers =
       findEntities(allEntities, mediaPlayerFilter).length > 0;
-    const hasClimate =
-      hass.panels.climate &&
-      findEntities(allEntities, climateFilters).length > 0;
+    const hasClimate = hass.panels.climate && hasClimateEntities(hass);
     const hasSecurity =
       hass.panels.security &&
       findEntities(allEntities, securityFilters).length > 0;
@@ -305,10 +314,8 @@ export class HomeOverviewViewStrategy extends ReactiveElement {
       .filter(weatherFilter)
       .sort()[0];
 
-    const energyPrefs = isComponentLoaded(hass.config, "energy")
-      ? // It raises if not configured, just swallow that.
-        await getEnergyPreferences(hass).catch(() => undefined)
-      : undefined;
+    const energyPrefs = await preloadHomeEnergyPreferences(hass);
+    energyPreferencesPromises.delete(hass.connection);
 
     const hasEnergy =
       hass.panels.energy &&

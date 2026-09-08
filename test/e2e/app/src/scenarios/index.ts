@@ -1,10 +1,47 @@
-import type { ExtEntityRegistryEntry } from "../../../../../src/data/entity/entity_registry";
 import type { AssistPipeline } from "../../../../../src/data/assist_pipeline";
+import type {
+  EntityRegistryEntry,
+  ExtEntityRegistryEntry,
+} from "../../../../../src/data/entity/entity_registry";
+import type { LovelaceRawConfig } from "../../../../../src/data/lovelace/config/types";
+import type { MediaPlayerItem } from "../../../../../src/data/media-player";
+import {
+  WeatherEntityFeature,
+  type ForecastEvent,
+} from "../../../../../src/data/weather";
 import type { MockHomeAssistant } from "../../../../../src/fake_data/provide_hass";
 
 export type Scenario = (hass: MockHomeAssistant) => Promise<void> | void;
 
 // ── Individual scenarios ───────────────────────────────────────────────────
+
+class ReconnectProbeCard extends HTMLElement {
+  constructor() {
+    super();
+    window.__reconnectProbeConstructed =
+      (window.__reconnectProbeConstructed ?? 0) + 1;
+  }
+
+  public connectedCallback(): void {
+    window.__reconnectProbeConnected =
+      (window.__reconnectProbeConnected ?? 0) + 1;
+  }
+
+  public disconnectedCallback(): void {
+    window.__reconnectProbeDisconnected =
+      (window.__reconnectProbeDisconnected ?? 0) + 1;
+  }
+
+  public setConfig(config: { label: string }): void {
+    window.__reconnectProbeConfigured =
+      (window.__reconnectProbeConfigured ?? 0) + 1;
+    this.textContent = config.label;
+  }
+
+  public getCardSize(): number {
+    return 1;
+  }
+}
 
 const defaultScenario: Scenario = async (_hass) => {
   // Default: admin user, light theme — nothing extra to do, ha-test.ts sets
@@ -19,6 +56,22 @@ const nonAdminScenario: Scenario = async (hass) => {
       is_owner: false,
     },
   });
+};
+
+const customPanelDefaultsScenario: Scenario = async (hass) => {
+  hass.updateHass({
+    userData: {},
+    systemData: {
+      default_panel: "home",
+    },
+  });
+};
+
+const customPanelDefaultsNonAdminScenario: Scenario = async (hass) => {
+  await customPanelDefaultsScenario(hass);
+  // Keep admin-only fixtures in the panel map to exercise the frontend's
+  // defence-in-depth filter. Core removes these panels for non-admin users.
+  await nonAdminScenario(hass);
 };
 
 const darkThemeScenario: Scenario = async (hass) => {
@@ -90,6 +143,51 @@ const lightMoreInfoScenario: Scenario = async (hass) => {
   hass.mockWS("config/entity_registry/get", () => registryEntry);
 };
 
+const weatherMoreInfoScenario: Scenario = (hass) => {
+  hass.addEntities([
+    {
+      entity_id: "weather.test_weather",
+      state: "sunny",
+      attributes: {
+        friendly_name: "Test Weather",
+        supported_features:
+          WeatherEntityFeature.FORECAST_DAILY +
+          WeatherEntityFeature.FORECAST_HOURLY,
+        precipitation_unit: "mm",
+        pressure_unit: "hPa",
+        temperature: 20,
+        temperature_unit: "°C",
+        visibility_unit: "km",
+        wind_speed_unit: "km/h",
+      },
+    },
+  ]);
+
+  hass.mockWS("weather/subscribe_forecast", (message, _hass, onChange) => {
+    onChange?.({
+      type: message.forecast_type,
+      forecast: [
+        {
+          datetime: "2026-08-13T10:00:00Z",
+          temperature: 20,
+          condition: "sunny",
+        },
+        {
+          datetime: "2026-08-13T11:00:00Z",
+          temperature: 21,
+          condition: "sunny",
+        },
+        {
+          datetime: "2026-08-13T12:00:00Z",
+          temperature: 22,
+          condition: "sunny",
+        },
+      ],
+    } satisfies ForecastEvent);
+    return () => undefined;
+  });
+};
+
 const quickSearchAssistScenario: Scenario = async (hass) => {
   const pipeline: AssistPipeline = {
     id: "test-pipeline",
@@ -124,13 +222,239 @@ const quickSearchAssistScenario: Scenario = async (hass) => {
   });
 };
 
+const addLaunchScreen = () => {
+  const launchScreen = document.createElement("div");
+  launchScreen.id = "ha-launch-screen";
+  document.body.prepend(launchScreen);
+};
+
+const delayedLovelaceScenario: Scenario = (hass) => {
+  addLaunchScreen();
+
+  const config: LovelaceRawConfig = {
+    views: [
+      {
+        title: "Home",
+        cards: [{ type: "markdown", content: "Dashboard ready" }],
+      },
+    ],
+  };
+  let resolveConfig: ((config: LovelaceRawConfig) => void) | undefined;
+  const configPromise = new Promise<LovelaceRawConfig>((resolve) => {
+    resolveConfig = resolve;
+  });
+
+  window.resolveLovelaceConfig = () => resolveConfig?.(config);
+  hass.mockWS("lovelace/config", () => configPromise);
+};
+
+class ReconnectSectionStrategy extends HTMLElement {
+  public static registryDependencies = [];
+
+  public static async generate() {
+    window.__reconnectSidebarGenerations =
+      (window.__reconnectSidebarGenerations ?? 0) + 1;
+    return {
+      cards: [
+        {
+          type: "markdown",
+          content: `Generation ${window.__reconnectSidebarGenerations}`,
+        },
+      ],
+    };
+  }
+}
+
+const reconnectIframeScenario = (hass: MockHomeAssistant, sidebar = false) => {
+  if (!customElements.get("reconnect-probe-card")) {
+    customElements.define("reconnect-probe-card", ReconnectProbeCard);
+  }
+  if (!customElements.get("ll-strategy-section-reconnect-probe")) {
+    customElements.define(
+      "ll-strategy-section-reconnect-probe",
+      ReconnectSectionStrategy
+    );
+  }
+
+  const iframeUrls = [1, 2].map((version) =>
+    URL.createObjectURL(
+      new Blob(
+        [
+          `<!doctype html><html><body><label>Preserved value <input id="preserved-value"></label><span>${version}</span><script>window.parent.__reconnectIframeLoads = (window.parent.__reconnectIframeLoads ?? 0) + 1;</script></body></html>`,
+        ],
+        { type: "text/html" }
+      )
+    )
+  );
+  let changed = false;
+  let deferNext = false;
+  window.__lovelaceReconnectFetches = 0;
+  window.__reconnectIframeLoads = 0;
+  window.__reconnectProbeConfigured = 0;
+  window.__reconnectProbeConnected = 0;
+  window.__reconnectProbeConstructed = 0;
+  window.__reconnectProbeDisconnected = 0;
+  window.__reconnectSidebarGenerations = 0;
+  window.deferLovelaceConfig = () => {
+    deferNext = true;
+  };
+  window.useChangedLovelaceConfig = () => {
+    changed = true;
+  };
+  hass.mockWS("lovelace/config", () => {
+    window.__lovelaceReconnectFetches =
+      (window.__lovelaceReconnectFetches ?? 0) + 1;
+    const cards = [
+      {
+        type: "iframe",
+        url: iframeUrls[changed ? 1 : 0],
+        aspect_ratio: "100%",
+      },
+      {
+        type: "custom:reconnect-probe-card",
+        label: changed ? "Changed" : "Initial",
+      },
+    ];
+    const sidebarSection = {
+      type: "grid",
+      strategy: { type: "custom:reconnect-probe" },
+    };
+    const config = structuredClone({
+      views: [
+        {
+          title: "Reconnect",
+          ...(sidebar
+            ? {
+                type: "sections",
+                sections: [{ type: "grid", cards }],
+                sidebar: { sections: [sidebarSection] },
+              }
+            : { cards }),
+        },
+      ],
+    } satisfies LovelaceRawConfig);
+    if (deferNext) {
+      deferNext = false;
+      return new Promise<LovelaceRawConfig>((resolve) => {
+        window.resolveLovelaceConfig = () => {
+          window.resolveLovelaceConfig = undefined;
+          resolve(config);
+        };
+      });
+    }
+    return config;
+  });
+};
+
+const delayedGeneratedDashboardScenario: Scenario = (hass) => {
+  addLaunchScreen();
+
+  const loadFragmentTranslation = hass.loadFragmentTranslation;
+  let resolveTranslation: (() => void) | undefined;
+  const translationReady = new Promise<void>((resolve) => {
+    resolveTranslation = resolve;
+  });
+
+  hass.loadFragmentTranslation = async (fragment) => {
+    if (fragment === "lovelace") {
+      await translationReady;
+    }
+    return loadFragmentTranslation(fragment);
+  };
+  window.resolveGeneratedDashboard = resolveTranslation;
+};
+
+const delayedCalendarScenario: Scenario = (hass) => {
+  addLaunchScreen();
+
+  let resolveRegistry: ((entries: EntityRegistryEntry[]) => void) | undefined;
+  const registryPromise = new Promise<EntityRegistryEntry[]>((resolve) => {
+    resolveRegistry = resolve;
+  });
+
+  window.resolveCalendarRegistry = () => resolveRegistry?.([]);
+  hass.mockWS("config/entity_registry/list", () => registryPromise);
+};
+
+const delayedIntegrationsScenario: Scenario = (hass) => {
+  addLaunchScreen();
+
+  hass.mockWS(
+    "config_entries/subscribe",
+    (_msg, _currentHass, onChange?: (updates: unknown[]) => void) => {
+      window.resolveConfigEntries = () => onChange?.([]);
+      return () => undefined;
+    }
+  );
+  hass.mockWS(
+    "config_entries/flow/subscribe",
+    (_msg, _currentHass, onChange?: (updates: unknown[]) => void) => {
+      window.resolveConfigEntriesInProgress = () => onChange?.([]);
+      return () => undefined;
+    }
+  );
+};
+
+const delayedMediaBrowseScenario: Scenario = (hass) => {
+  addLaunchScreen();
+
+  const root: MediaPlayerItem = {
+    title: "Media",
+    media_content_id: "media-source://media_source",
+    media_content_type: "app",
+    media_class: "directory",
+    can_play: false,
+    can_expand: true,
+    can_search: false,
+    children: [],
+  };
+  let resolveBrowse: ((item: MediaPlayerItem) => void) | undefined;
+  const browsePromise = new Promise<MediaPlayerItem>((resolve) => {
+    resolveBrowse = resolve;
+  });
+
+  window.resolveMediaBrowse = () => resolveBrowse?.(root);
+  hass.mockWS("media_source/browse_media", () => browsePromise);
+};
+
+const delayedMediaBrowseErrorScenario: Scenario = (hass) => {
+  addLaunchScreen();
+
+  let rejectBrowse:
+    ((reason: { code: string; message: string }) => void) | undefined;
+  const browsePromise = new Promise<MediaPlayerItem>((_resolve, reject) => {
+    rejectBrowse = reject;
+  });
+
+  window.rejectMediaBrowse = () =>
+    rejectBrowse?.({ code: "unknown_error", message: "Browse failed" });
+  hass.mockWS("media_source/browse_media", () => browsePromise);
+};
+
 // ── Registry ──────────────────────────────────────────────────────────────
 
 export const scenarios: Record<string, Scenario> = {
   default: defaultScenario,
   "non-admin": nonAdminScenario,
+  "custom-panel-defaults": customPanelDefaultsScenario,
+  "custom-panel-defaults-non-admin": customPanelDefaultsNonAdminScenario,
   "dark-theme": darkThemeScenario,
   "custom-theme": customThemeScenario,
+  "delayed-calendar": delayedCalendarScenario,
+  "delayed-generated-dashboard": delayedGeneratedDashboardScenario,
+  "delayed-integrations": delayedIntegrationsScenario,
+  "delayed-media-browse": delayedMediaBrowseScenario,
+  "delayed-media-browse-error": delayedMediaBrowseErrorScenario,
   "light-more-info": lightMoreInfoScenario,
+  "weather-more-info": weatherMoreInfoScenario,
   "quick-search-assist": quickSearchAssistScenario,
+  "delayed-lovelace": delayedLovelaceScenario,
+  "reconnect-iframe": reconnectIframeScenario,
+  "reconnect-sidebar-strategy": (hass) => reconnectIframeScenario(hass, true),
 };
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "reconnect-probe-card": ReconnectProbeCard;
+  }
+}

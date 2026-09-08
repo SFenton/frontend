@@ -1,4 +1,5 @@
 import type {
+  Connection,
   HassEntityAttributeBase,
   HassEntityBase,
 } from "home-assistant-js-websocket";
@@ -124,17 +125,108 @@ export const fetchStreamUrl = async (
   return stream;
 };
 
-export const webRtcOffer = (
+export const webRtcOffer = async (
   hass: Pick<HomeAssistant, "connection">,
   entity_id: string,
   offer: string,
-  callback: (event: WebRtcOfferEvent) => void
-) =>
-  hass.connection.subscribeMessage<WebRtcOfferEvent>(callback, {
-    type: "camera/webrtc/offer",
-    entity_id,
-    offer,
+  callback: (event: WebRtcOfferEvent) => void,
+  signal?: AbortSignal
+): Promise<() => Promise<void>> => {
+  const connection = hass.connection;
+  let socket: Connection["socket"];
+  let disposed = false;
+  const cancelled = () => disposed || signal?.aborted;
+  const ownsSocket = () =>
+    socket !== undefined &&
+    connection.socket === socket &&
+    connection.connected;
+  const abortError = () =>
+    new DOMException("WebRTC offer was cancelled", "AbortError");
+  if (signal?.aborted) throw abortError();
+  let release: (() => Promise<void>) | undefined;
+  const reportCleanupFailure = (error: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error("Failed to cancel WebRTC offer", error);
+  };
+  let onCancelled!: () => void;
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    onCancelled = () => {
+      disposed = true;
+      release?.().catch(reportCleanupFailure);
+      reject(abortError());
+    };
   });
+  connection.addEventListener("disconnected", onCancelled);
+  signal?.addEventListener("abort", onCancelled, { once: true });
+
+  const subscription = connection
+    .subscribeMessage<WebRtcOfferEvent>(
+      (event) => {
+        if (!cancelled() && ownsSocket()) {
+          callback(event);
+        }
+      },
+      {
+        type: "camera/webrtc/offer",
+        entity_id,
+        offer,
+      },
+      {
+        resubscribe: false,
+        // The library can queue an initial subscription across reconnect, too.
+        preCheck: () => {
+          socket = connection.socket;
+          if (cancelled() || !socket || !connection.connected) return false;
+          // Connection.close() does not emit the library's disconnected event.
+          socket.addEventListener("close", onCancelled, { once: true });
+          return true;
+        },
+      }
+    )
+    .then(async (unsubscribe) => {
+      let cleanup: Promise<void> | undefined;
+      const stop = () => {
+        disposed = true;
+        signal?.removeEventListener("abort", onCancelled);
+        cleanup ??= (async () => {
+          // Subscription IDs are reused on a replacement socket.
+          if (!ownsSocket()) return;
+          try {
+            await unsubscribe();
+          } catch (error) {
+            if (ownsSocket()) throw error;
+          }
+        })();
+        return cleanup;
+      };
+      release = stop;
+      if (cancelled() || !ownsSocket()) {
+        await stop().catch(reportCleanupFailure);
+        throw abortError();
+      }
+      return stop;
+    });
+
+  try {
+    // Non-resubscribing in-flight subscriptions are not rejected by the library.
+    return await Promise.race([subscription, cancellation]);
+  } catch (error) {
+    if (
+      cancelled() &&
+      error instanceof Error &&
+      error.message === "Pre-check failed"
+    ) {
+      throw abortError();
+    }
+    throw error;
+  } finally {
+    connection.removeEventListener("disconnected", onCancelled);
+    socket?.removeEventListener("close", onCancelled);
+    if (!release || cancelled()) {
+      signal?.removeEventListener("abort", onCancelled);
+    }
+  }
+};
 
 export const addWebRtcCandidate = (
   hass: Pick<HomeAssistant, "callWS">,

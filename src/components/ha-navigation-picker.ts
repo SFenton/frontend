@@ -9,13 +9,12 @@ import { caseInsensitiveStringCompare } from "../common/string/compare";
 import { getConfigEntries, type ConfigEntry } from "../data/config_entries";
 import { getIngressPanelInfoCollection } from "../data/hassio/ingress";
 import { fetchConfig } from "../data/lovelace/config/types";
-import { SYSTEM_PANELS } from "../data/panel";
+import { PANEL_DASHBOARDS, SYSTEM_PANELS } from "../data/panel";
 import {
   CONFIG_SUB_ROUTES,
   computeNavigationPathInfo,
 } from "../data/compute-navigation-path-info";
 import { findRelated, type RelatedResult } from "../data/search";
-import { PANEL_DASHBOARDS } from "../panels/config/lovelace/dashboards/ha-config-lovelace-dashboards";
 import { computeAreaPath } from "../panels/lovelace/strategies/areas/helpers/areas-strategy-helper";
 import { multiTermSortedSearch } from "../resources/fuseMultiTerm";
 import type { HomeAssistant, ValueChangedEvent } from "../types";

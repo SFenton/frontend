@@ -33,6 +33,7 @@ Never run `tsc` or `yarn lint:types` with file arguments. When `tsc` receives fi
 - Do not query or manipulate DOM manually when Lit decorators, component refs, or render state are appropriate.
 - Scope styles to components, use theme custom properties, and keep layouts mobile-first and RTL-safe.
 - All user-facing text must be localized through the translation system.
+- Do not write tests just because you changed some code. Write a test when there is real logic that could break without anyone noticing, and explain what the test protects.
 
 ## Project Skills
 
@@ -40,6 +41,9 @@ Detailed guidance lives in project skills under `.agents/skills/`. Load the matc
 
 - `ha-frontend-contexts`: Lit contexts, `hass` migration, and rerender-sensitive state access.
 - `ha-frontend-components`: dialogs, forms, alerts, shortcuts, tooltips, panels, and Lovelace cards.
+- `ha-frontend-events`: event handler typing, custom event dispatch, and event-map declarations.
+- `ha-frontend-types`: backend data contracts, optional schemas, shared types, assertions, and lifecycle types.
+- `ha-frontend-lit`: reactive fields, DOM queries, lifecycle behavior, and render-derived state.
 - `ha-frontend-styling`: theme variables, spacing tokens, responsive layout, RTL, and view transitions.
 - `ha-frontend-testing`: lint, typecheck, Vitest, Playwright e2e dev servers, and benchmarks.
 - `ha-frontend-user-facing-text`: localization, terminology, sentence case, and Home Assistant text style.

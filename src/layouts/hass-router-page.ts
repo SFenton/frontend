@@ -5,6 +5,7 @@ import memoizeOne from "memoize-one";
 import { navigate } from "../common/navigate";
 import { computeRouteTail } from "../common/url/route";
 import type { Route } from "../types";
+import { recoverFromStaleBuild } from "../util/recover-stale-build";
 import { PanelReady } from "./panel-ready";
 
 const extractPage = (path: string, defaultPage: string) => {
@@ -23,6 +24,8 @@ export interface RouteOptions {
   // Function to load the page.
   load?: () => Promise<unknown>;
   cache?: boolean;
+  // Recreate the page when the remaining path (the item id) changes.
+  itemId?: boolean;
   waitForReady?: boolean;
 }
 
@@ -137,10 +140,23 @@ export class HassRouterPage extends ReactiveElement {
     }
 
     if (this._currentPage === newPage) {
-      if (this.lastChild) {
-        this.updatePageEl(this.lastChild, changedProps);
+      const oldRoute = changedProps.get("route");
+      const oldTail = oldRoute ? computeRouteTail(oldRoute).path : undefined;
+      const newTail = route ? this._computeTail(route).path : undefined;
+      if (
+        typeof routeOptions === "object" &&
+        routeOptions.itemId &&
+        oldTail !== newTail
+      ) {
+        // Fall through to the normal create path so `load` / loading screen
+        // still run. itemId pages are not cached, so this is a new element.
+        this._currentPage = "";
+      } else {
+        if (this.lastChild) {
+          this.updatePageEl(this.lastChild, changedProps);
+        }
+        return;
       }
-      return;
     }
 
     if (!routeOptions) {
@@ -182,10 +198,25 @@ export class HassRouterPage extends ReactiveElement {
         this._showLoadingScreenTimeout = undefined;
       }
 
-      // Show error screen
-      this.appendChild(
-        this.createErrorScreen(`Error while loading page ${newPage}.`)
+      // A stale build (the panel's hashed chunk 404s after an upgrade while
+      // the app stayed open) is recoverable: reload onto the current build
+      // (or prompt when there are unsaved edits) instead of dead-ending.
+      const message = err instanceof Error ? err.message : String(err ?? "");
+      const recovery = recoverFromStaleBuild(message, this);
+
+      // Show error screen, offering a reload action for a stale build. Set
+      // `showReload` on the returned element rather than through
+      // createErrorScreen's signature, so router subclasses that override
+      // createErrorScreen (e.g. ToolsRouter) can't drop it.
+      const errorScreen = this.createErrorScreen(
+        `Error while loading page ${newPage}.`
       );
+      this.appendChild(errorScreen);
+      // That action drops the caches, so only offer it once the probe has
+      // confirmed the chunk is really gone.
+      void Promise.resolve(recovery).then((stale) => {
+        errorScreen.showReload = stale;
+      });
     });
 
     // If we don't show loading screen, just show the panel.
@@ -353,7 +384,10 @@ export class HassRouterPage extends ReactiveElement {
     this.updatePageEl(panelEl);
     this.appendChild(panelEl);
 
-    if (routerOptions.cacheAll || routeOptions.cache) {
+    if (
+      (routerOptions.cacheAll || routeOptions.cache) &&
+      !routeOptions.itemId
+    ) {
       this._cache[page] = panelEl;
     }
   }

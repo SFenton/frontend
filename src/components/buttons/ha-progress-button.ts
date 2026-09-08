@@ -127,10 +127,15 @@ export class HaProgressButton extends LitElement {
       --mdc-icon-size: 16px;
     }
 
+    /* Fade the content out rather than hiding it, so the button keeps its
+       accessible name while the result icon covers it. */
     ha-button.result::part(start),
     ha-button.result::part(end),
     ha-button.result::part(label),
-    ha-button.result::part(caret),
+    ha-button.result::part(caret) {
+      opacity: 0;
+    }
+
     ha-button.result::part(spinner) {
       visibility: hidden;
     }

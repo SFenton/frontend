@@ -1,5 +1,5 @@
 import { consume, type ContextType } from "@lit/context";
-import type { UnsubscribeFunc } from "home-assistant-js-websocket";
+import type { Connection, UnsubscribeFunc } from "home-assistant-js-websocket";
 import type { PropertyValues, TemplateResult } from "lit";
 import { css, html, LitElement } from "lit";
 import { customElement, property, query, state } from "lit/decorators";
@@ -16,6 +16,8 @@ import {
 } from "../data/camera";
 import { apiContext, connectionContext } from "../data/context";
 import "./ha-alert";
+
+const HIDDEN_CLEANUP_DELAY = 60000;
 
 /**
  * A WebRTC stream is established by first sending an offer through a signal
@@ -56,29 +58,116 @@ class HaWebRtcPlayer extends LitElement {
 
   @query("#remote-stream") private _videoEl!: HTMLVideoElement;
 
-  private _clientConfig?: WebRTCClientConfiguration;
-
   private _peerConnection?: RTCPeerConnection;
 
   private _remoteStream?: MediaStream;
 
-  private _unsub?: Promise<UnsubscribeFunc>;
+  private _unsub?: UnsubscribeFunc;
+
+  private _offerAbort?: AbortController;
+
+  private _negotiationGeneration = 0;
 
   private _sessionId?: string;
 
   private _candidatesList: RTCIceCandidate[] = [];
 
+  private _hiddenCleanupTimeout?: number;
+
+  private _startGeneration = 0;
+
+  private _startedEntityId?: string;
+
+  private _startedSocket?: Connection["socket"];
+
+  private _readyConnection?: Connection;
+
+  private _readySocket?: Connection["socket"];
+
+  private _pictureInPictureReconnect?: {
+    connection: Connection;
+    entityId: string;
+    expires: number;
+  };
+
+  private _timerRunning = false;
+
   private _handleVisibilityChange = () => {
-    if (document.pictureInPictureElement) {
+    if (this._isPictureInPicture()) {
       // video is playing in picture-in-picture mode, don't do anything
       return;
     }
     if (document.hidden) {
-      this._cleanUp();
+      this._scheduleHiddenCleanup();
+    } else if (this._hiddenCleanupTimeout) {
+      // stream was not cleaned up yet, just cancel the cleanup
+      clearTimeout(this._hiddenCleanupTimeout);
+      this._hiddenCleanupTimeout = undefined;
     } else {
       this._startWebRtc();
     }
   };
+
+  private _scheduleHiddenCleanup(delay = HIDDEN_CLEANUP_DELAY): void {
+    clearTimeout(this._hiddenCleanupTimeout);
+    this._hiddenCleanupTimeout = window.setTimeout(() => {
+      this._hiddenCleanupTimeout = undefined;
+      if (document.hidden && !this._isPictureInPicture()) {
+        this._cleanUp();
+      }
+    }, delay);
+  }
+
+  private _handleConnectionReady = () => {
+    this._attachSocketCloseListener();
+    clearTimeout(this._hiddenCleanupTimeout);
+    this._hiddenCleanupTimeout = undefined;
+    this._startWebRtc();
+  };
+
+  private _handleConnectionDisconnected = () => {
+    if (this._isPictureInPicture() && this._readyConnection && this.entityid) {
+      // Stopping tracks can end PiP before the replacement socket is ready.
+      this._pictureInPictureReconnect = {
+        connection: this._readyConnection,
+        entityId: this.entityid,
+        expires: Date.now() + HIDDEN_CLEANUP_DELAY,
+      };
+    }
+    this._detachSocketCloseListener();
+    clearTimeout(this._hiddenCleanupTimeout);
+    this._hiddenCleanupTimeout = undefined;
+    this._cleanUp();
+  };
+
+  private _handleSocketClose = (event: Event) => {
+    if (event.currentTarget === this._readySocket) {
+      this._handleConnectionDisconnected();
+    }
+  };
+
+  private _attachSocketCloseListener(): void {
+    const socket = this._readyConnection?.socket;
+    if (socket === this._readySocket) return;
+    this._detachSocketCloseListener();
+    this._readySocket = socket;
+    socket?.addEventListener("close", this._handleSocketClose);
+  }
+
+  private _detachSocketCloseListener(): void {
+    this._readySocket?.removeEventListener("close", this._handleSocketClose);
+    this._readySocket = undefined;
+  }
+
+  private _isPictureInPicture(): boolean {
+    const video = this._videoEl;
+    return Boolean(
+      video &&
+      (document.pictureInPictureElement === video ||
+        document.pictureInPictureElement === this ||
+        this.shadowRoot?.pictureInPictureElement === video)
+    );
+  }
 
   protected override render(): TemplateResult {
     if (this._error) {
@@ -93,6 +182,7 @@ class HaWebRtcPlayer extends LitElement {
         ?controls=${this.controls}
         poster=${ifDefined(this.posterUrl)}
         @loadeddata=${this._loadedData}
+        @leavepictureinpicture=${this._handleVisibilityChange}
         style=${styleMap({
           height: this.aspectRatio == null ? "100%" : "auto",
           aspectRatio: this.aspectRatio,
@@ -104,6 +194,7 @@ class HaWebRtcPlayer extends LitElement {
 
   public override connectedCallback() {
     super.connectedCallback();
+    this._attachReadyListener();
     if (this.hasUpdated && this.entityid) {
       this._startWebRtc();
     }
@@ -116,19 +207,77 @@ class HaWebRtcPlayer extends LitElement {
       "visibilitychange",
       this._handleVisibilityChange
     );
+    this._detachReadyListener();
+    clearTimeout(this._hiddenCleanupTimeout);
+    this._hiddenCleanupTimeout = undefined;
     this._cleanUp();
   }
 
-  protected override willUpdate(changedProperties: PropertyValues<this>) {
+  protected override willUpdate(changedProperties: PropertyValues) {
     super.willUpdate(changedProperties);
-    if (!changedProperties.has("entityid")) {
-      return;
+    const connectionChanged =
+      changedProperties.has("_connection") && this._attachReadyListener();
+    if (
+      changedProperties.has("entityid") ||
+      (connectionChanged && this.hasUpdated)
+    ) {
+      this._startWebRtc();
     }
-    this._startWebRtc();
+  }
+
+  private _attachReadyListener(): boolean {
+    const connection = this._connection?.connection;
+    if (
+      !this.isConnected ||
+      !connection ||
+      connection === this._readyConnection
+    ) {
+      return false;
+    }
+    this._detachReadyListener();
+    connection.addEventListener("ready", this._handleConnectionReady);
+    connection.addEventListener(
+      "disconnected",
+      this._handleConnectionDisconnected
+    );
+    this._readyConnection = connection;
+    this._attachSocketCloseListener();
+    return true;
+  }
+
+  private _detachReadyListener(): void {
+    this._pictureInPictureReconnect = undefined;
+    this._detachSocketCloseListener();
+    this._readyConnection?.removeEventListener(
+      "ready",
+      this._handleConnectionReady
+    );
+    this._readyConnection?.removeEventListener(
+      "disconnected",
+      this._handleConnectionDisconnected
+    );
+    this._readyConnection = undefined;
   }
 
   private async _startWebRtc(): Promise<void> {
+    const presentation = this._pictureInPictureReconnect;
+    this._pictureInPictureReconnect = undefined;
+    const presentationDeadline = this._isPictureInPicture()
+      ? Date.now() + HIDDEN_CLEANUP_DELAY
+      : presentation &&
+          presentation.connection === this._connection?.connection &&
+          presentation.entityId === this.entityid &&
+          presentation.expires > Date.now()
+        ? presentation.expires
+        : undefined;
     this._cleanUp();
+    const startGeneration = this._startGeneration;
+    if (
+      !this.isConnected ||
+      (document.hidden && presentationDeadline === undefined)
+    ) {
+      return;
+    }
 
     // Browser support required for WebRTC
     if (typeof RTCPeerConnection === "undefined") {
@@ -137,9 +286,25 @@ class HaWebRtcPlayer extends LitElement {
       return;
     }
 
-    if (!this._api || !this._connection || !this.entityid) {
+    if (
+      !this._api ||
+      !this._connection?.connection.connected ||
+      !this.entityid
+    ) {
       return;
     }
+    if (
+      document.hidden &&
+      presentationDeadline !== undefined &&
+      !this._isPictureInPicture()
+    ) {
+      // Finish the admitted recovery, but retain the normal hidden cleanup limit.
+      this._scheduleHiddenCleanup(
+        Math.max(0, presentationDeadline - Date.now())
+      );
+    }
+    this._startedEntityId = this.entityid;
+    this._startedSocket = this._connection.connection.socket;
 
     this._error = undefined;
 
@@ -147,107 +312,179 @@ class HaWebRtcPlayer extends LitElement {
 
     this._logEvent("start clientConfig");
 
-    this._clientConfig = await fetchWebRtcClientConfiguration(
-      this._api,
-      this.entityid
-    );
-
-    this._logEvent("end clientConfig", this._clientConfig);
-
-    this._peerConnection = new RTCPeerConnection(
-      this._clientConfig.configuration
-    );
-
-    if (this._clientConfig.dataChannel) {
-      // Some cameras (such as nest) require a data channel to establish a stream
-      // however, not used by any integrations.
-      this._peerConnection.createDataChannel(this._clientConfig.dataChannel);
+    let clientConfig: WebRTCClientConfiguration;
+    try {
+      clientConfig = await fetchWebRtcClientConfiguration(
+        this._api,
+        this.entityid
+      );
+    } catch (error: unknown) {
+      this._fail(
+        "Failed to load WebRTC configuration: ",
+        error,
+        startGeneration
+      );
+      return;
     }
 
-    this._peerConnection.onnegotiationneeded = this._startNegotiation;
+    if (!this._isCurrent(startGeneration)) {
+      return;
+    }
 
-    this._peerConnection.onicecandidate = this._handleIceCandidate;
-    this._peerConnection.oniceconnectionstatechange =
-      this._iceConnectionStateChanged;
-
-    // just for debugging
-    this._peerConnection.onsignalingstatechange = (ev) => {
-      switch ((ev.target as RTCPeerConnection).signalingState) {
-        case "stable":
-          this._logEvent("ICE negotiation complete");
-          break;
-        default:
-          this._logEvent(
-            "Signaling state changed",
-            (ev.target as RTCPeerConnection).signalingState
-          );
+    this._logEvent("end clientConfig", clientConfig);
+    try {
+      const peer = new RTCPeerConnection(clientConfig.configuration);
+      this._peerConnection = peer;
+      if (clientConfig.dataChannel) {
+        // Some cameras (such as nest) require a data channel to establish a stream
+        // however, not used by any integrations.
+        peer.createDataChannel(clientConfig.dataChannel);
       }
-    };
 
-    // Setup callbacks to render remote stream once media tracks are discovered.
-    this._remoteStream = new MediaStream();
-    this._peerConnection.ontrack = this._addTrack;
+      peer.onnegotiationneeded = () =>
+        this._startNegotiation(peer, startGeneration);
+      peer.onicecandidate = (event) =>
+        this._handleIceCandidate(event, peer, startGeneration);
+      peer.oniceconnectionstatechange = () => {
+        if (this._isCurrent(startGeneration, peer)) {
+          this._iceConnectionStateChanged();
+        }
+      };
 
-    this._peerConnection.addTransceiver("audio", { direction: "recvonly" });
-    this._peerConnection.addTransceiver("video", { direction: "recvonly" });
+      // just for debugging
+      peer.onsignalingstatechange = (ev) => {
+        if (!this._isCurrent(startGeneration, peer)) return;
+        switch ((ev.target as RTCPeerConnection).signalingState) {
+          case "stable":
+            this._logEvent("ICE negotiation complete");
+            break;
+          default:
+            this._logEvent(
+              "Signaling state changed",
+              (ev.target as RTCPeerConnection).signalingState
+            );
+        }
+      };
+
+      // Setup callbacks to render remote stream once media tracks are discovered.
+      this._remoteStream = new MediaStream();
+      peer.ontrack = (event) => this._addTrack(event, peer, startGeneration);
+      peer.addTransceiver("audio", { direction: "recvonly" });
+      peer.addTransceiver("video", { direction: "recvonly" });
+    } catch (error: unknown) {
+      this._fail("Failed to start WebRTC stream: ", error, startGeneration);
+    }
   }
 
-  private _startNegotiation = async () => {
-    if (!this._peerConnection) {
+  private _isCurrent(generation: number, peer?: RTCPeerConnection): boolean {
+    return (
+      this.isConnected &&
+      generation === this._startGeneration &&
+      this.entityid === this._startedEntityId &&
+      this._connection?.connection === this._readyConnection &&
+      this._readyConnection?.socket === this._startedSocket &&
+      (!peer || peer === this._peerConnection)
+    );
+  }
+
+  private _fail(prefix: string, error: unknown, generation: number): void {
+    if (!this._isCurrent(generation)) return;
+    const message =
+      error && typeof error === "object" && "message" in error
+        ? String(error.message)
+        : String(error);
+    this._error = prefix + message;
+    this._cleanUp();
+  }
+
+  private async _startNegotiation(
+    peerConnection: RTCPeerConnection,
+    startGeneration: number
+  ) {
+    if (
+      !this._isCurrent(startGeneration, peerConnection) ||
+      !this._connection.connection.connected
+    ) {
       return;
     }
-
-    const offerOptions: RTCOfferOptions = {
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: true,
-    };
-
-    this._logEvent("start createOffer", offerOptions);
-
-    const offer: RTCSessionDescriptionInit =
-      await this._peerConnection.createOffer(offerOptions);
-
-    if (!this._peerConnection) {
-      return;
-    }
-
-    this._logEvent("end createOffer", offer);
-
-    this._logEvent("start setLocalDescription");
-
-    await this._peerConnection.setLocalDescription(offer);
-
-    if (!this._peerConnection || !this.entityid) {
-      return;
-    }
-
-    this._logEvent("end setLocalDescription");
-
-    let candidates = "";
-
-    while (this._candidatesList.length) {
-      const candidate = this._candidatesList.pop();
-      if (candidate) {
-        candidates += `a=${candidate}\r\n`;
-      }
-    }
-
-    const offer_sdp = offer.sdp! + candidates;
-
-    this._logEvent("start webRtcOffer", offer_sdp);
+    const negotiationGeneration = ++this._negotiationGeneration;
+    this._offerAbort?.abort();
+    this._unsubscribeOffer();
+    const controller = new AbortController();
+    this._offerAbort = controller;
+    this._sessionId = undefined;
+    const isCurrent = () =>
+      this._isCurrent(startGeneration, peerConnection) &&
+      negotiationGeneration === this._negotiationGeneration &&
+      !controller.signal.aborted;
 
     try {
-      this._unsub = webRtcOffer(
+      const offerOptions: RTCOfferOptions = {
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      };
+
+      this._logEvent("start createOffer", offerOptions);
+
+      const offer: RTCSessionDescriptionInit =
+        await peerConnection.createOffer(offerOptions);
+
+      if (!isCurrent()) {
+        return;
+      }
+
+      this._logEvent("end createOffer", offer);
+
+      this._logEvent("start setLocalDescription");
+
+      await peerConnection.setLocalDescription(offer);
+
+      if (!isCurrent() || !this.entityid) {
+        return;
+      }
+
+      this._logEvent("end setLocalDescription");
+
+      let candidates = "";
+
+      while (this._candidatesList.length) {
+        const candidate = this._candidatesList.pop();
+        if (candidate) {
+          candidates += `a=${candidate.candidate}\r\n`;
+        }
+      }
+
+      const offer_sdp = offer.sdp! + candidates;
+
+      this._logEvent("start webRtcOffer", offer_sdp);
+
+      const unsubscribe = await webRtcOffer(
         this._connection,
         this.entityid,
         offer_sdp,
-        (event) => this._handleOfferEvent(event)
+        (event) => {
+          if (isCurrent()) {
+            this._handleOfferEvent(
+              event,
+              peerConnection,
+              startGeneration,
+              isCurrent
+            );
+          }
+        },
+        controller.signal
       );
-    } catch (err: any) {
-      this._error = "Failed to start WebRTC stream: " + err.message;
-      this._cleanUp();
+      if (!isCurrent()) {
+        await unsubscribe();
+        return;
+      }
+      this._unsub = unsubscribe;
+    } catch (error: unknown) {
+      if (isCurrent()) {
+        this._fail("Failed to start WebRTC stream: ", error, startGeneration);
+      }
     }
-  };
+  }
 
   private _iceConnectionStateChanged = () => {
     this._logEvent(
@@ -259,27 +496,26 @@ class HaWebRtcPlayer extends LitElement {
     }
   };
 
-  private async _handleOfferEvent(event: WebRtcOfferEvent) {
-    if (!this.entityid) {
+  private async _handleOfferEvent(
+    event: WebRtcOfferEvent,
+    peer: RTCPeerConnection,
+    generation: number,
+    isCurrent: () => boolean
+  ) {
+    if (!this.entityid || !isCurrent()) {
       return;
     }
     if (event.type === "session") {
       this._sessionId = event.session_id;
       this._candidatesList.forEach((candidate) =>
-        addWebRtcCandidate(
-          this._api,
-          this.entityid!,
-          event.session_id,
-          // toJSON returns RTCIceCandidateInit
-          candidate.toJSON()
-        )
+        this._sendCandidate(candidate, event.session_id, isCurrent)
       );
       this._candidatesList = [];
     }
     if (event.type === "answer") {
       this._logEvent("answer", event.answer);
 
-      this._handleAnswer(event);
+      this._handleAnswer(event, peer, generation, isCurrent);
     }
     if (event.type === "candidate") {
       this._logEvent("remote ice candidate", event.candidate);
@@ -295,10 +531,11 @@ class HaWebRtcPlayer extends LitElement {
                 sdpMid: "0",
               });
 
-        await this._peerConnection?.addIceCandidate(candidate);
-      } catch (err: any) {
-        // eslint-disable-next-line no-console
-        console.error(err);
+        await peer.addIceCandidate(candidate);
+      } catch (error: unknown) {
+        if (isCurrent()) {
+          this._reportCandidateFailure("remote", error);
+        }
       }
     }
     if (event.type === "error") {
@@ -307,8 +544,16 @@ class HaWebRtcPlayer extends LitElement {
     }
   }
 
-  private _handleIceCandidate = (event: RTCPeerConnectionIceEvent) => {
-    if (!this.entityid || !event.candidate?.candidate) {
+  private _handleIceCandidate = (
+    event: RTCPeerConnectionIceEvent,
+    peer: RTCPeerConnection,
+    generation: number
+  ) => {
+    if (
+      !this._isCurrent(generation, peer) ||
+      !this.entityid ||
+      !event.candidate?.candidate
+    ) {
       return;
     }
 
@@ -319,57 +564,111 @@ class HaWebRtcPlayer extends LitElement {
     );
 
     if (this._sessionId) {
-      addWebRtcCandidate(
-        this._api,
-        this.entityid,
+      const negotiation = this._negotiationGeneration;
+      this._sendCandidate(
+        event.candidate,
         this._sessionId,
-        // toJSON returns RTCIceCandidateInit
-        event.candidate.toJSON()
+        () =>
+          this._isCurrent(generation, peer) &&
+          negotiation === this._negotiationGeneration
       );
     } else {
       this._candidatesList.push(event.candidate);
     }
   };
 
-  private _addTrack = async (event: RTCTrackEvent) => {
-    if (!this._remoteStream) {
+  private async _sendCandidate(
+    candidate: RTCIceCandidate,
+    sessionId: string,
+    isCurrent: () => boolean
+  ): Promise<void> {
+    if (
+      !isCurrent() ||
+      !this.entityid ||
+      !this._connection.connection.connected
+    ) {
+      return;
+    }
+    try {
+      await addWebRtcCandidate(
+        this._api,
+        this.entityid,
+        sessionId,
+        candidate.toJSON()
+      );
+    } catch (error: unknown) {
+      if (isCurrent()) {
+        this._reportCandidateFailure("local", error);
+      }
+    }
+  }
+
+  private _reportCandidateFailure(
+    direction: "remote" | "local",
+    error: unknown
+  ): void {
+    // Other candidates can establish or maintain media after one is rejected.
+    // eslint-disable-next-line no-console
+    console.warn(`Failed to add ${direction} WebRTC ICE candidate`, error);
+  }
+
+  private _addTrack = async (
+    event: RTCTrackEvent,
+    peer: RTCPeerConnection,
+    generation: number
+  ) => {
+    if (!this._isCurrent(generation, peer) || !this._remoteStream) {
+      event.track.stop();
       return;
     }
     // If the track is audio and the player is muted, we do not add it to the stream.
     if (event.track.kind === "audio" && this.muted) {
       return;
     }
-    this._remoteStream.addTrack(event.track);
+    const stream = this._remoteStream;
+    stream.addTrack(event.track);
     if (!this.hasUpdated) {
       await this.updateComplete;
     }
-    this._videoEl.srcObject = this._remoteStream;
+    if (this._isCurrent(generation, peer) && this._videoEl) {
+      this._videoEl.srcObject = stream;
+    }
   };
 
-  private async _handleAnswer(event: WebRtcAnswer) {
-    if (
-      !this._peerConnection?.signalingState ||
-      ["stable", "closed"].includes(this._peerConnection.signalingState)
-    ) {
+  private async _handleAnswer(
+    event: WebRtcAnswer,
+    peer: RTCPeerConnection,
+    generation: number,
+    isCurrent: () => boolean
+  ) {
+    if (!isCurrent() || ["stable", "closed"].includes(peer.signalingState)) {
       return;
     }
 
     // Initiate the stream with the remote device
-    const remoteDesc = new RTCSessionDescription({
-      type: "answer",
-      sdp: event.answer,
-    });
     try {
+      const remoteDesc = new RTCSessionDescription({
+        type: "answer",
+        sdp: event.answer,
+      });
       this._logEvent("start setRemoteDescription", remoteDesc);
-      await this._peerConnection.setRemoteDescription(remoteDesc);
-    } catch (err: any) {
-      this._error = "Failed to connect WebRTC stream: " + err.message;
-      this._cleanUp();
+      await peer.setRemoteDescription(remoteDesc);
+    } catch (error: unknown) {
+      if (isCurrent()) {
+        this._fail("Failed to connect WebRTC stream: ", error, generation);
+      }
     }
-    this._logEvent("end setRemoteDescription");
+    if (isCurrent()) this._logEvent("end setRemoteDescription");
   }
 
   private _cleanUp() {
+    this._startGeneration += 1;
+    this._negotiationGeneration += 1;
+    this._offerAbort?.abort();
+    this._offerAbort = undefined;
+    this._startedEntityId = undefined;
+    this._startedSocket = undefined;
+
     if (this._remoteStream) {
       this._remoteStream.getTracks().forEach((track) => {
         track.stop();
@@ -378,7 +677,8 @@ class HaWebRtcPlayer extends LitElement {
       this._remoteStream = undefined;
     }
     const videoEl = this._videoEl;
-    if (videoEl) {
+    if (videoEl && !this._isPictureInPicture()) {
+      videoEl.srcObject = null;
       videoEl.removeAttribute("src");
       videoEl.load();
     }
@@ -397,17 +697,30 @@ class HaWebRtcPlayer extends LitElement {
       this._peerConnection = undefined;
 
       this._logEvent("stopped");
-      this._stopTimer();
     }
-    this._unsub?.then((unsub) => unsub());
-    this._unsub = undefined;
+    this._unsubscribeOffer();
     this._sessionId = undefined;
     this._candidatesList = [];
+    this._stopTimer();
+  }
+
+  private _unsubscribeOffer(): void {
+    const unsubscribe = this._unsub;
+    this._unsub = undefined;
+    if (unsubscribe) {
+      Promise.resolve(unsubscribe()).catch((error: unknown) => {
+        // eslint-disable-next-line no-console
+        console.error("Failed to unsubscribe WebRTC stream", error);
+      });
+    }
   }
 
   private _loadedData() {
     const video = this._videoEl;
-    const stream = video.srcObject as MediaStream;
+    const stream = video?.srcObject as MediaStream | null;
+    if (!stream || stream !== this._remoteStream || !this._peerConnection) {
+      return;
+    }
 
     const data = {
       hasAudio: Boolean(stream?.getAudioTracks().length),
@@ -422,23 +735,25 @@ class HaWebRtcPlayer extends LitElement {
   }
 
   private _startTimer() {
-    if (!__DEV__) {
+    if (!__DEV__ || this._timerRunning) {
       return;
     }
     // eslint-disable-next-line no-console
     console.time("WebRTC");
+    this._timerRunning = true;
   }
 
   private _stopTimer() {
-    if (!__DEV__) {
+    if (!__DEV__ || !this._timerRunning) {
       return;
     }
     // eslint-disable-next-line no-console
     console.timeEnd("WebRTC");
+    this._timerRunning = false;
   }
 
   private _logEvent(msg: string, ...args: unknown[]) {
-    if (!__DEV__) {
+    if (!__DEV__ || !this._timerRunning) {
       return;
     }
     // eslint-disable-next-line no-console
