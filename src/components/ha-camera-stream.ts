@@ -3,7 +3,7 @@ import { css, html, LitElement, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators";
 import { repeat } from "lit/directives/repeat";
 import { styleMap } from "lit/directives/style-map";
-import { STATE_RUNNING } from "home-assistant-js-websocket";
+import { STATE_RUNNING, type Connection } from "home-assistant-js-websocket";
 import memoizeOne from "memoize-one";
 import { fireEvent } from "../common/dom/fire_event";
 import { computeStateName } from "../common/entity/compute_state_name";
@@ -70,6 +70,41 @@ export class HaCameraStream extends LitElement {
 
   @state() private _webRtcStreams?: { hasAudio: boolean; hasVideo: boolean };
 
+  private _readyConnection?: Connection;
+
+  private _handleConnectionReady = () => {
+    // A terminal HLS failure may have replaced the player with its image fallback.
+    if (
+      this._hlsStreams?.hasVideo === false &&
+      !this._webRtcStreams?.hasVideo
+    ) {
+      this._hlsStreams = undefined;
+    }
+  };
+
+  private _attachReadyListener(): void {
+    const connection = this._connection?.connection;
+    if (
+      !this.isConnected ||
+      !connection ||
+      connection === this._readyConnection
+    ) {
+      return;
+    }
+    this._detachReadyListener();
+    connection.addEventListener("ready", this._handleConnectionReady);
+    this._readyConnection = connection;
+    if (this.hasUpdated) this._handleConnectionReady();
+  }
+
+  private _detachReadyListener(): void {
+    this._readyConnection?.removeEventListener(
+      "ready",
+      this._handleConnectionReady
+    );
+    this._readyConnection = undefined;
+  }
+
   private _thumbnailApi = memoizeOne(
     (
       api: ContextType<typeof apiContext>,
@@ -81,6 +116,7 @@ export class HaCameraStream extends LitElement {
   );
 
   public willUpdate(changedProps: PropertyValues): void {
+    if (changedProps.has("_connection")) this._attachReadyListener();
     const entityChanged =
       changedProps.has("stateObj") &&
       this.stateObj &&
@@ -105,11 +141,13 @@ export class HaCameraStream extends LitElement {
 
   public connectedCallback() {
     super.connectedCallback();
+    this._attachReadyListener();
     this._connected = true;
   }
 
   public disconnectedCallback() {
     super.disconnectedCallback();
+    this._detachReadyListener();
     this._connected = false;
   }
 

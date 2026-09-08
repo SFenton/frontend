@@ -92,6 +92,17 @@ declare global {
   interface Window {
     __assistRun?: unknown;
     __mockHass: MockHomeAssistant;
+    __lovelaceReconnectFetches?: number;
+    __reconnectIframeElement?: HTMLIFrameElement;
+    __reconnectIframeLoads?: number;
+    __reconnectIframeWindow?: Window | null;
+    __reconnectProbeConfigured?: number;
+    __reconnectProbeConnected?: number;
+    __reconnectProbeConstructed?: number;
+    __reconnectProbeDisconnected?: number;
+    __reconnectSidebarGenerations?: number;
+    deferLovelaceConfig?: () => void;
+    useChangedLovelaceConfig?: () => void;
     rejectMediaBrowse?: () => void;
     resolveCalendarRegistry?: () => void;
     resolveConfigEntries?: () => void;

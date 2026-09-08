@@ -4738,7 +4738,8 @@
               "set_as_default": "Set as default",
               "type": {
                 "user_created": "User created",
-                "built_in": "Built-in"
+                "built_in": "Built-in",
+                "custom_panel": "Custom panel"
               }
             },
             "confirm_delete_title": "Delete {dashboard_title}?",

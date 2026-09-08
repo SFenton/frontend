@@ -13,9 +13,13 @@ import "../../components/ha-svg-icon";
 import { saveFrontendUserData } from "../../data/frontend";
 import type { LovelaceDashboard } from "../../data/lovelace/dashboard";
 import { fetchDashboards } from "../../data/lovelace/dashboard";
-import { getPanelIcon, getPanelTitle } from "../../data/panel";
+import {
+  getPanelIcon,
+  getPanelTitle,
+  getSelectableCustomPanels,
+  PANEL_DASHBOARDS,
+} from "../../data/panel";
 import type { HomeAssistant, PanelInfo } from "../../types";
-import { PANEL_DASHBOARDS } from "../config/lovelace/dashboards/ha-config-lovelace-dashboards";
 
 const USE_SYSTEM_VALUE = "___use_system___";
 
@@ -34,6 +38,7 @@ class HaPickDashboardRow extends LitElement {
 
   protected render(): TemplateResult {
     const value = this.hass.userData?.default_panel || USE_SYSTEM_VALUE;
+    const customPanels = getSelectableCustomPanels(this.hass);
     return html`
       <ha-settings-row .narrow=${this.narrow}>
         <span slot="heading">
@@ -102,6 +107,27 @@ class HaPickDashboardRow extends LitElement {
                               </ha-dropdown-item>
                             `;
                           })}
+                        `
+                      : nothing
+                  }
+                  ${
+                    customPanels.length
+                      ? html`
+                          <wa-divider></wa-divider>
+                          ${customPanels.map(
+                            (panel) => html`
+                              <ha-dropdown-item
+                                .value=${panel.url_path}
+                                .selected=${value === panel.url_path}
+                              >
+                                <ha-icon
+                                  slot="icon"
+                                  .icon=${getPanelIcon(panel)}
+                                ></ha-icon>
+                                ${getPanelTitle(this.hass, panel)}
+                              </ha-dropdown-item>
+                            `
+                          )}
                         `
                       : nothing
                   }

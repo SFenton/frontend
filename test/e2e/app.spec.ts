@@ -4,7 +4,7 @@
  * Run with:
  *   yarn test:e2e:app
  */
-import { test, expect } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import {
   appSidebar,
   appSidebarConfig,
@@ -29,6 +29,88 @@ import {
   connectivityLinks,
   moreInfoViewElements,
 } from "./app/src/smoke";
+
+const testHass = (page: Page) => page.locator("ha-test");
+
+const personalDashboardPicker = (page: Page) =>
+  page.locator("ha-pick-dashboard-row ha-select");
+
+const dashboardRow = (page: Page, title: string) =>
+  page.getByRole("row").filter({
+    has: page.getByRole("rowheader", {
+      name: new RegExp(`^${title}(?:\\s|$)`),
+    }),
+  });
+
+const openDashboardRowMenu = async (page: Page, title: string) => {
+  const menu = dashboardRow(page, title).locator("ha-icon-overflow-menu");
+  await menu.evaluate((element) => {
+    const trigger = element.shadowRoot?.querySelector("ha-icon-button");
+    if (!(trigger instanceof HTMLElement)) {
+      throw new Error("Dashboard row overflow trigger not found");
+    }
+    trigger.click();
+  });
+  await expect
+    .poll(() =>
+      menu.evaluate(
+        (element) =>
+          (
+            element.shadowRoot?.querySelector("ha-dropdown") as
+              { open?: boolean } | undefined
+          )?.open
+      )
+    )
+    .toBe(true);
+  return menu;
+};
+
+const dashboardRowMenuItemCount = (menu: Locator) =>
+  menu.evaluate(
+    (element) =>
+      element.shadowRoot?.querySelectorAll("ha-dropdown-item").length ?? 0
+  );
+
+const clickFirstDashboardRowMenuItem = async (menu: Locator) => {
+  await menu.evaluate((element) => {
+    const item = element.shadowRoot?.querySelector("ha-dropdown-item");
+    if (!(item instanceof HTMLElement)) {
+      throw new Error("Dashboard row menu item not found");
+    }
+    item.click();
+  });
+};
+
+const reconnectProbeCounts = (page: Page) =>
+  page.evaluate(() => ({
+    configured: window.__reconnectProbeConfigured,
+    connected: window.__reconnectProbeConnected,
+    constructed: window.__reconnectProbeConstructed,
+    disconnected: window.__reconnectProbeDisconnected,
+  }));
+
+const waitForLovelaceApplied = async (page: Page) => {
+  const panel = page.locator("ha-panel-lovelace");
+  await expect
+    .poll(() => panel.evaluate((element) => Reflect.get(element, "_loading")))
+    .toBe(false);
+  await panel.evaluate(async (element) => {
+    const settle = async (node: Element): Promise<void> => {
+      await (node as Element & { updateComplete?: Promise<unknown> })
+        .updateComplete;
+      const children = [
+        ...Array.from(node.children),
+        ...Array.from(node.shadowRoot?.children ?? []),
+      ];
+      await Promise.all(children.map(settle));
+    };
+    await settle(element);
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+    await settle(element);
+  });
+};
 
 // ---------------------------------------------------------------------------
 // App shell
@@ -119,6 +201,268 @@ test.describe("App shell", () => {
     await expect(appSidebarConfig(page)).not.toBeAttached({
       timeout: QUICK_TIMEOUT,
     });
+  });
+});
+
+test.describe("Custom panel defaults", () => {
+  test("selects a custom panel as the personal default", async ({ page }) => {
+    await goToPanel(page, "/?scenario=custom-panel-defaults#/profile/general");
+
+    await personalDashboardPicker(page).click();
+
+    await expect(
+      page.getByRole("menuitem", { name: "Custom panel" })
+    ).toBeVisible({ timeout: QUICK_TIMEOUT });
+    await expect(page.getByRole("menuitem", { name: "HACS" })).toBeVisible({
+      timeout: QUICK_TIMEOUT,
+    });
+    await expect(
+      page.getByRole("menuitem", { name: "Hidden custom panel" })
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("menuitem", { name: "Config custom panel" })
+    ).toHaveCount(0);
+
+    await page.getByRole("menuitem", { name: "Custom panel" }).click();
+
+    await expect
+      .poll(() =>
+        testHass(page).evaluate(
+          (
+            element: HTMLElement & {
+              hass?: { userData?: { default_panel?: string } };
+            }
+          ) => element.hass?.userData?.default_panel
+        )
+      )
+      .toBe("custom-panel");
+
+    await page.evaluate(() => {
+      window.location.hash = "#/";
+    });
+
+    await expect(page).toHaveURL(/#\/custom-panel(?:\/general)?$/, {
+      timeout: QUICK_TIMEOUT,
+    });
+    await expect(page.locator("test-custom-panel")).toHaveText(
+      "Custom panel loaded",
+      { timeout: PANEL_TIMEOUT }
+    );
+  });
+
+  test("does not offer admin-only custom panels to a non-admin", async ({
+    page,
+  }) => {
+    await goToPanel(
+      page,
+      "/?scenario=custom-panel-defaults-non-admin#/profile/general"
+    );
+
+    await personalDashboardPicker(page).click();
+
+    await expect(
+      page.getByRole("menuitem", { name: "Custom panel" })
+    ).toBeVisible({ timeout: QUICK_TIMEOUT });
+    await expect(page.getByRole("menuitem", { name: "HACS" })).toHaveCount(0);
+  });
+
+  test("selects a custom panel as the system default", async ({ page }) => {
+    await goToPanel(
+      page,
+      "/?scenario=custom-panel-defaults#/config/lovelace/dashboards"
+    );
+
+    const customPanelRow = dashboardRow(page, "Custom panel");
+    await expect(customPanelRow).toBeVisible({ timeout: PANEL_TIMEOUT });
+    await expect(dashboardRow(page, "HACS")).toBeVisible({
+      timeout: PANEL_TIMEOUT,
+    });
+    await expect(dashboardRow(page, "Hidden custom panel")).toHaveCount(0);
+    await expect(dashboardRow(page, "Config custom panel")).toHaveCount(0);
+
+    const customPanelMenu = await openDashboardRowMenu(page, "Custom panel");
+    expect(await dashboardRowMenuItemCount(customPanelMenu)).toBe(1);
+    await clickFirstDashboardRowMenuItem(customPanelMenu);
+    await page.getByRole("button", { name: "OK" }).click();
+
+    await expect
+      .poll(() =>
+        testHass(page).evaluate(
+          (
+            element: HTMLElement & {
+              hass?: { systemData?: { default_panel?: string } };
+            }
+          ) => element.hass?.systemData?.default_panel
+        )
+      )
+      .toBe("custom-panel");
+
+    await page.evaluate(() => {
+      window.location.hash = "#/";
+    });
+
+    await expect(page).toHaveURL(/#\/custom-panel(?:\/dashboard)?$/, {
+      timeout: QUICK_TIMEOUT,
+    });
+    await expect(page.locator("test-custom-panel")).toHaveText(
+      "Custom panel loaded",
+      { timeout: PANEL_TIMEOUT }
+    );
+  });
+
+  test("blocks an admin-only custom panel as the system default", async ({
+    page,
+  }) => {
+    await goToPanel(
+      page,
+      "/?scenario=custom-panel-defaults#/config/lovelace/dashboards"
+    );
+
+    const hacsMenu = await openDashboardRowMenu(page, "HACS");
+    await clickFirstDashboardRowMenuItem(hacsMenu);
+
+    await expect(page.getByRole("dialog")).toBeVisible({
+      timeout: QUICK_TIMEOUT,
+    });
+    await expect
+      .poll(() =>
+        testHass(page).evaluate(
+          (
+            element: HTMLElement & {
+              hass?: { systemData?: { default_panel?: string } };
+            }
+          ) => element.hass?.systemData?.default_panel
+        )
+      )
+      .not.toBe("admin-custom-panel");
+  });
+});
+
+test.describe("Lovelace reconnect lifecycle", () => {
+  test("preserves iframe state when the dashboard config is unchanged", async ({
+    page,
+  }) => {
+    const errors = trackPageErrors(page);
+    await goToPanel(page, "/?scenario=reconnect-iframe#/lovelace");
+
+    const iframe = page.locator("hui-iframe-card iframe").first();
+    await expect(iframe).toBeAttached({ timeout: PANEL_TIMEOUT });
+    await expect
+      .poll(() => page.evaluate(() => window.__reconnectIframeLoads))
+      .toBe(1);
+    await expect
+      .poll(() => reconnectProbeCounts(page))
+      .toEqual({
+        configured: 1,
+        connected: 1,
+        constructed: 1,
+        disconnected: 0,
+      });
+
+    await page
+      .frameLocator("hui-iframe-card iframe")
+      .locator("#preserved-value")
+      .fill("still here");
+    await iframe.evaluate((element) => {
+      window.__reconnectIframeElement = element as HTMLIFrameElement;
+      window.__reconnectIframeWindow = (
+        element as HTMLIFrameElement
+      ).contentWindow;
+    });
+
+    await page.evaluate(() => {
+      window.deferLovelaceConfig?.();
+      window.dispatchEvent(
+        new CustomEvent("connection-status", { detail: "connected" })
+      );
+    });
+    await expect
+      .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
+      .toBe(2);
+    expect(
+      await page
+        .locator("ha-panel-lovelace")
+        .evaluate((element) => Reflect.get(element, "_loading"))
+    ).toBe(true);
+    await page.evaluate(() => window.resolveLovelaceConfig?.());
+    await waitForLovelaceApplied(page);
+
+    await expect(
+      page.frameLocator("hui-iframe-card iframe").locator("#preserved-value")
+    ).toHaveValue("still here");
+    expect(await page.evaluate(() => window.__reconnectIframeLoads)).toBe(1);
+    await expect
+      .poll(() => reconnectProbeCounts(page))
+      .toEqual({
+        configured: 1,
+        connected: 1,
+        constructed: 1,
+        disconnected: 0,
+      });
+    expect(
+      await iframe.evaluate(
+        (element) =>
+          window.__reconnectIframeElement === element &&
+          window.__reconnectIframeWindow ===
+            (element as HTMLIFrameElement).contentWindow
+      )
+    ).toBe(true);
+
+    await page.evaluate(() => {
+      window.useChangedLovelaceConfig?.();
+      window.dispatchEvent(
+        new CustomEvent("connection-status", { detail: "connected" })
+      );
+    });
+    await expect
+      .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
+      .toBe(3);
+    await waitForLovelaceApplied(page);
+    expect(
+      await iframe.evaluate(
+        (element) => window.__reconnectIframeElement === element
+      )
+    ).toBe(false);
+    await expect
+      .poll(() => reconnectProbeCounts(page))
+      .toEqual({
+        configured: 2,
+        connected: 2,
+        constructed: 2,
+        disconnected: 1,
+      });
+    expectNoPageErrors(errors, undefined, []);
+  });
+
+  test("regenerates a sidebar strategy even when its descriptor and dependencies are unchanged", async ({
+    page,
+  }) => {
+    const errors = trackPageErrors(page);
+    await goToPanel(page, "/?scenario=reconnect-sidebar-strategy#/lovelace");
+    await expect
+      .poll(() => page.evaluate(() => window.__reconnectSidebarGenerations))
+      .toBe(1);
+    await page.evaluate(() =>
+      window.dispatchEvent(
+        new CustomEvent("connection-status", { detail: "connected" })
+      )
+    );
+    await expect
+      .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
+      .toBe(2);
+    await waitForLovelaceApplied(page);
+    await expect
+      .poll(() => page.evaluate(() => window.__reconnectSidebarGenerations))
+      .toBe(2);
+    await expect
+      .poll(() => reconnectProbeCounts(page))
+      .toEqual({
+        configured: 2,
+        connected: 2,
+        constructed: 2,
+        disconnected: 1,
+      });
+    expectNoPageErrors(errors, undefined, []);
   });
 });
 

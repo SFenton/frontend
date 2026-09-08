@@ -15,6 +15,34 @@ export type Scenario = (hass: MockHomeAssistant) => Promise<void> | void;
 
 // ── Individual scenarios ───────────────────────────────────────────────────
 
+class ReconnectProbeCard extends HTMLElement {
+  constructor() {
+    super();
+    window.__reconnectProbeConstructed =
+      (window.__reconnectProbeConstructed ?? 0) + 1;
+  }
+
+  public connectedCallback(): void {
+    window.__reconnectProbeConnected =
+      (window.__reconnectProbeConnected ?? 0) + 1;
+  }
+
+  public disconnectedCallback(): void {
+    window.__reconnectProbeDisconnected =
+      (window.__reconnectProbeDisconnected ?? 0) + 1;
+  }
+
+  public setConfig(config: { label: string }): void {
+    window.__reconnectProbeConfigured =
+      (window.__reconnectProbeConfigured ?? 0) + 1;
+    this.textContent = config.label;
+  }
+
+  public getCardSize(): number {
+    return 1;
+  }
+}
+
 const defaultScenario: Scenario = async (_hass) => {
   // Default: admin user, light theme — nothing extra to do, ha-test.ts sets
   // everything up already.
@@ -28,6 +56,22 @@ const nonAdminScenario: Scenario = async (hass) => {
       is_owner: false,
     },
   });
+};
+
+const customPanelDefaultsScenario: Scenario = async (hass) => {
+  hass.updateHass({
+    userData: {},
+    systemData: {
+      default_panel: "home",
+    },
+  });
+};
+
+const customPanelDefaultsNonAdminScenario: Scenario = async (hass) => {
+  await customPanelDefaultsScenario(hass);
+  // Keep admin-only fixtures in the panel map to exercise the frontend's
+  // defence-in-depth filter. Core removes these panels for non-admin users.
+  await nonAdminScenario(hass);
 };
 
 const darkThemeScenario: Scenario = async (hass) => {
@@ -204,6 +248,104 @@ const delayedLovelaceScenario: Scenario = (hass) => {
   hass.mockWS("lovelace/config", () => configPromise);
 };
 
+class ReconnectSectionStrategy extends HTMLElement {
+  public static registryDependencies = [];
+
+  public static async generate() {
+    window.__reconnectSidebarGenerations =
+      (window.__reconnectSidebarGenerations ?? 0) + 1;
+    return {
+      cards: [
+        {
+          type: "markdown",
+          content: `Generation ${window.__reconnectSidebarGenerations}`,
+        },
+      ],
+    };
+  }
+}
+
+const reconnectIframeScenario = (hass: MockHomeAssistant, sidebar = false) => {
+  if (!customElements.get("reconnect-probe-card")) {
+    customElements.define("reconnect-probe-card", ReconnectProbeCard);
+  }
+  if (!customElements.get("ll-strategy-section-reconnect-probe")) {
+    customElements.define(
+      "ll-strategy-section-reconnect-probe",
+      ReconnectSectionStrategy
+    );
+  }
+
+  const iframeUrls = [1, 2].map((version) =>
+    URL.createObjectURL(
+      new Blob(
+        [
+          `<!doctype html><html><body><label>Preserved value <input id="preserved-value"></label><span>${version}</span><script>window.parent.__reconnectIframeLoads = (window.parent.__reconnectIframeLoads ?? 0) + 1;</script></body></html>`,
+        ],
+        { type: "text/html" }
+      )
+    )
+  );
+  let changed = false;
+  let deferNext = false;
+  window.__lovelaceReconnectFetches = 0;
+  window.__reconnectIframeLoads = 0;
+  window.__reconnectProbeConfigured = 0;
+  window.__reconnectProbeConnected = 0;
+  window.__reconnectProbeConstructed = 0;
+  window.__reconnectProbeDisconnected = 0;
+  window.__reconnectSidebarGenerations = 0;
+  window.deferLovelaceConfig = () => {
+    deferNext = true;
+  };
+  window.useChangedLovelaceConfig = () => {
+    changed = true;
+  };
+  hass.mockWS("lovelace/config", () => {
+    window.__lovelaceReconnectFetches =
+      (window.__lovelaceReconnectFetches ?? 0) + 1;
+    const cards = [
+      {
+        type: "iframe",
+        url: iframeUrls[changed ? 1 : 0],
+        aspect_ratio: "100%",
+      },
+      {
+        type: "custom:reconnect-probe-card",
+        label: changed ? "Changed" : "Initial",
+      },
+    ];
+    const sidebarSection = {
+      type: "grid",
+      strategy: { type: "custom:reconnect-probe" },
+    };
+    const config = structuredClone({
+      views: [
+        {
+          title: "Reconnect",
+          ...(sidebar
+            ? {
+                type: "sections",
+                sections: [{ type: "grid", cards }],
+                sidebar: { sections: [sidebarSection] },
+              }
+            : { cards }),
+        },
+      ],
+    } satisfies LovelaceRawConfig);
+    if (deferNext) {
+      deferNext = false;
+      return new Promise<LovelaceRawConfig>((resolve) => {
+        window.resolveLovelaceConfig = () => {
+          window.resolveLovelaceConfig = undefined;
+          resolve(config);
+        };
+      });
+    }
+    return config;
+  });
+};
+
 const delayedGeneratedDashboardScenario: Scenario = (hass) => {
   addLaunchScreen();
 
@@ -294,6 +436,8 @@ const delayedMediaBrowseErrorScenario: Scenario = (hass) => {
 export const scenarios: Record<string, Scenario> = {
   default: defaultScenario,
   "non-admin": nonAdminScenario,
+  "custom-panel-defaults": customPanelDefaultsScenario,
+  "custom-panel-defaults-non-admin": customPanelDefaultsNonAdminScenario,
   "dark-theme": darkThemeScenario,
   "custom-theme": customThemeScenario,
   "delayed-calendar": delayedCalendarScenario,
@@ -305,4 +449,12 @@ export const scenarios: Record<string, Scenario> = {
   "weather-more-info": weatherMoreInfoScenario,
   "quick-search-assist": quickSearchAssistScenario,
   "delayed-lovelace": delayedLovelaceScenario,
+  "reconnect-iframe": reconnectIframeScenario,
+  "reconnect-sidebar-strategy": (hass) => reconnectIframeScenario(hass, true),
 };
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "reconnect-probe-card": ReconnectProbeCard;
+  }
+}
