@@ -64,7 +64,9 @@ class HaWebRtcPlayer extends LitElement {
 
   private _remoteStream?: MediaStream;
 
-  private _unsub?: Promise<UnsubscribeFunc>;
+  private _unsub?: UnsubscribeFunc;
+
+  private _offerAbort?: AbortController;
 
   private _sessionId?: string;
 
@@ -73,6 +75,10 @@ class HaWebRtcPlayer extends LitElement {
   private _hiddenCleanupTimeout?: number;
 
   private _startGeneration = 0;
+
+  private _startConnection?: Connection;
+
+  private _startSocket?: NonNullable<Connection["socket"]>;
 
   private _readyConnection?: Connection;
 
@@ -185,7 +191,6 @@ class HaWebRtcPlayer extends LitElement {
 
   private async _startWebRtc(): Promise<void> {
     this._cleanUp();
-    const startGeneration = this._startGeneration;
 
     // Browser support required for WebRTC
     if (typeof RTCPeerConnection === "undefined") {
@@ -197,6 +202,16 @@ class HaWebRtcPlayer extends LitElement {
     if (!this._api || !this._connection || !this.entityid) {
       return;
     }
+
+    const connection = this._connection.connection;
+    const expectedSocket = connection.socket;
+    if (!connection.connected || !expectedSocket) {
+      return;
+    }
+
+    const startGeneration = this._startGeneration;
+    this._startConnection = connection;
+    this._startSocket = expectedSocket;
 
     this._error = undefined;
 
@@ -210,16 +225,14 @@ class HaWebRtcPlayer extends LitElement {
         this._api,
         this.entityid
       );
-    } catch (err: any) {
-      if (startGeneration !== this._startGeneration || !this.isConnected) {
+    } catch (err) {
+      if (!this._isCurrent(startGeneration, connection, expectedSocket)) {
         return;
       }
-      this._error = "Failed to load WebRTC configuration: " + err.message;
-      this._cleanUp();
-      return;
+      throw err;
     }
 
-    if (startGeneration !== this._startGeneration || !this.isConnected) {
+    if (!this._isCurrent(startGeneration, connection, expectedSocket)) {
       return;
     }
 
@@ -267,72 +280,135 @@ class HaWebRtcPlayer extends LitElement {
 
   private _startNegotiation = async () => {
     const peerConnection = this._peerConnection;
-    const startGeneration = this._startGeneration;
     if (!peerConnection) {
       return;
     }
 
+    const startGeneration = this._startGeneration;
+    const connection = this._startConnection;
+    const expectedSocket = this._startSocket;
+    if (
+      !connection ||
+      !expectedSocket ||
+      !this._isCurrent(
+        startGeneration,
+        connection,
+        expectedSocket,
+        peerConnection
+      )
+    ) {
+      return;
+    }
+
+    this._offerAbort?.abort();
+    this._unsubscribeOffer();
+    const offerAbort = new AbortController();
+    this._offerAbort = offerAbort;
+    const isCurrent = () =>
+      this._offerAbort === offerAbort &&
+      !offerAbort.signal.aborted &&
+      this._isCurrent(
+        startGeneration,
+        connection,
+        expectedSocket,
+        peerConnection
+      );
+
+    const offerOptions: RTCOfferOptions = {
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true,
+    };
+
+    this._logEvent("start createOffer", offerOptions);
+
+    let offer: RTCSessionDescriptionInit;
     try {
-      const offerOptions: RTCOfferOptions = {
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: true,
-      };
-
-      this._logEvent("start createOffer", offerOptions);
-
-      const offer: RTCSessionDescriptionInit =
-        await peerConnection.createOffer(offerOptions);
-
-      if (
-        startGeneration !== this._startGeneration ||
-        peerConnection !== this._peerConnection
-      ) {
+      offer = await peerConnection.createOffer(offerOptions);
+    } catch (err) {
+      if (!isCurrent()) {
         return;
       }
+      throw err;
+    }
 
-      this._logEvent("end createOffer", offer);
+    if (!isCurrent()) {
+      return;
+    }
 
-      this._logEvent("start setLocalDescription");
+    this._logEvent("end createOffer", offer);
 
+    this._logEvent("start setLocalDescription");
+
+    try {
       await peerConnection.setLocalDescription(offer);
-
-      if (
-        startGeneration !== this._startGeneration ||
-        peerConnection !== this._peerConnection ||
-        !this.entityid
-      ) {
+    } catch (err) {
+      if (!isCurrent()) {
         return;
       }
+      throw err;
+    }
 
-      this._logEvent("end setLocalDescription");
+    if (!isCurrent() || !this.entityid) {
+      return;
+    }
 
-      let candidates = "";
+    this._logEvent("end setLocalDescription");
 
-      while (this._candidatesList.length) {
-        const candidate = this._candidatesList.pop();
-        if (candidate) {
-          candidates += `a=${candidate}\r\n`;
-        }
+    let candidates = "";
+
+    while (this._candidatesList.length) {
+      const candidate = this._candidatesList.pop();
+      if (candidate) {
+        candidates += `a=${candidate}\r\n`;
       }
+    }
 
-      const offer_sdp = offer.sdp! + candidates;
+    const offer_sdp = offer.sdp! + candidates;
 
-      this._logEvent("start webRtcOffer", offer_sdp);
+    this._logEvent("start webRtcOffer", offer_sdp);
 
-      this._unsub = webRtcOffer(
+    try {
+      const unsubscribe = await webRtcOffer(
         this._connection,
         this.entityid,
         offer_sdp,
-        (event) => this._handleOfferEvent(event)
+        (event) => this._handleOfferEvent(event),
+        {
+          signal: offerAbort.signal,
+          expectedSocket,
+        }
       );
+      if (!isCurrent()) {
+        await unsubscribe();
+        return;
+      }
+      this._unsub = unsubscribe;
     } catch (err: any) {
-      if (startGeneration !== this._startGeneration) {
+      if (!isCurrent()) {
         return;
       }
       this._error = "Failed to start WebRTC stream: " + err.message;
       this._cleanUp();
     }
   };
+
+  private _isCurrent(
+    startGeneration: number,
+    connection: Connection,
+    expectedSocket: NonNullable<Connection["socket"]>,
+    peerConnection?: RTCPeerConnection
+  ): boolean {
+    return (
+      this.isConnected &&
+      startGeneration === this._startGeneration &&
+      this._startConnection === connection &&
+      this._startSocket === expectedSocket &&
+      this._connection?.connection === connection &&
+      connection.connected &&
+      connection.socket === expectedSocket &&
+      (!peerConnection || peerConnection === this._peerConnection)
+    );
+  }
 
   private _iceConnectionStateChanged = () => {
     this._logEvent(
@@ -456,6 +532,10 @@ class HaWebRtcPlayer extends LitElement {
 
   private _cleanUp() {
     this._startGeneration += 1;
+    this._startConnection = undefined;
+    this._startSocket = undefined;
+    this._offerAbort?.abort();
+    this._offerAbort = undefined;
 
     if (this._remoteStream) {
       this._remoteStream.getTracks().forEach((track) => {
@@ -485,11 +565,18 @@ class HaWebRtcPlayer extends LitElement {
 
       this._logEvent("stopped");
     }
-    this._unsub?.then((unsub) => unsub()).catch(() => undefined);
-    this._unsub = undefined;
+    this._unsubscribeOffer();
     this._sessionId = undefined;
     this._candidatesList = [];
     this._stopTimer();
+  }
+
+  private _unsubscribeOffer(): void {
+    const unsubscribe = this._unsub;
+    this._unsub = undefined;
+    if (unsubscribe) {
+      Promise.resolve(unsubscribe()).catch(() => undefined);
+    }
   }
 
   private _loadedData() {

@@ -8,19 +8,33 @@ import type {
 import { apiContext, connectionContext } from "../../src/data/context";
 import "../../src/components/ha-web-rtc-player";
 
-const { fetchWebRtcClientConfiguration } = vi.hoisted(() => ({
+const { fetchWebRtcClientConfiguration, webRtcOffer } = vi.hoisted(() => ({
   fetchWebRtcClientConfiguration: vi.fn(),
+  webRtcOffer: vi.fn(),
 }));
 
 vi.mock("../../src/data/camera", async (importOriginal) => ({
   ...(await importOriginal<typeof CameraModule>()),
   fetchWebRtcClientConfiguration,
+  webRtcOffer,
 }));
 
 class MockMediaStream {
   public addTrack = vi.fn();
 
   public getTracks = () => [];
+}
+
+class MockConnection extends EventTarget {
+  public connected = true;
+
+  public socket: EventTarget | undefined = new EventTarget();
+
+  public ready(): void {
+    this.connected = true;
+    this.socket = new EventTarget();
+    this.dispatchEvent(new Event("ready"));
+  }
 }
 
 class MockRTCPeerConnection {
@@ -73,10 +87,12 @@ class MockRTCPeerConnection {
 
 let host: HTMLDivElement | undefined;
 
+const createUnsubscribe = () => vi.fn().mockResolvedValue(undefined);
+
 const mountPlayer = async () => {
   host = document.createElement("div");
   document.body.append(host);
-  const connection = new EventTarget();
+  const connection = new MockConnection();
 
   new ContextProvider(host, {
     context: apiContext,
@@ -103,11 +119,27 @@ const mountPlayer = async () => {
   return { connection, player };
 };
 
+const triggerNegotiation = (peer: MockRTCPeerConnection): Promise<void> =>
+  Promise.resolve(
+    peer.onnegotiationneeded?.call(
+      peer as unknown as RTCPeerConnection,
+      new Event("negotiationneeded")
+    )
+  );
+
+const startWebRtc = (
+  player: HTMLElementTagNameMap["ha-web-rtc-player"]
+): Promise<void> => {
+  const method = Reflect.get(player, "_startWebRtc") as () => Promise<void>;
+  return method.call(player);
+};
+
 beforeEach(() => {
   MockRTCPeerConnection.instances = [];
   fetchWebRtcClientConfiguration.mockReset().mockResolvedValue({
     configuration: { iceServers: [] },
   });
+  webRtcOffer.mockReset().mockResolvedValue(createUnsubscribe());
   vi.stubGlobal("MediaStream", MockMediaStream);
   vi.stubGlobal("RTCPeerConnection", MockRTCPeerConnection);
   vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(
@@ -131,7 +163,7 @@ describe("ha-web-rtc-player reconnect handling", () => {
     expect(MockRTCPeerConnection.instances).toHaveLength(1);
     const firstPeer = MockRTCPeerConnection.instances[0];
 
-    connection.dispatchEvent(new Event("ready"));
+    connection.ready();
 
     await vi.waitFor(() => {
       expect(fetchWebRtcClientConfiguration).toHaveBeenCalledTimes(2);
@@ -140,7 +172,7 @@ describe("ha-web-rtc-player reconnect handling", () => {
     expect(firstPeer.close).toHaveBeenCalledOnce();
 
     player.remove();
-    connection.dispatchEvent(new Event("ready"));
+    connection.ready();
     await Promise.resolve();
     expect(fetchWebRtcClientConfiguration).toHaveBeenCalledTimes(2);
   });
@@ -163,7 +195,7 @@ describe("ha-web-rtc-player reconnect handling", () => {
     );
 
     const { connection } = await mounting;
-    connection.dispatchEvent(new Event("ready"));
+    connection.ready();
     await vi.waitFor(() => {
       expect(fetchWebRtcClientConfiguration).toHaveBeenCalledTimes(2);
       expect(MockRTCPeerConnection.instances).toHaveLength(1);
@@ -193,7 +225,7 @@ describe("ha-web-rtc-player reconnect handling", () => {
     );
 
     const { connection } = await mounting;
-    connection.dispatchEvent(new Event("ready"));
+    connection.ready();
     await vi.waitFor(() => {
       expect(fetchWebRtcClientConfiguration).toHaveBeenCalledTimes(2);
       expect(MockRTCPeerConnection.instances).toHaveLength(1);
@@ -203,6 +235,14 @@ describe("ha-web-rtc-player reconnect handling", () => {
     await Promise.resolve();
 
     expect(MockRTCPeerConnection.instances).toHaveLength(1);
+  });
+
+  it("preserves an active client configuration rejection", async () => {
+    const { player } = await mountPlayer();
+    const failure = new Error("configuration failed");
+    fetchWebRtcClientConfiguration.mockRejectedValueOnce(failure);
+
+    await expect(startWebRtc(player)).rejects.toBe(failure);
   });
 
   it("does not apply a stale negotiation to the replacement peer", async () => {
@@ -215,11 +255,8 @@ describe("ha-web-rtc-player reconnect handling", () => {
       })
     );
 
-    const negotiation = firstPeer.onnegotiationneeded?.call(
-      firstPeer as unknown as RTCPeerConnection,
-      new Event("negotiationneeded")
-    );
-    connection.dispatchEvent(new Event("ready"));
+    const negotiation = triggerNegotiation(firstPeer);
+    connection.ready();
     await vi.waitFor(() =>
       expect(MockRTCPeerConnection.instances).toHaveLength(2)
     );
@@ -233,12 +270,172 @@ describe("ha-web-rtc-player reconnect handling", () => {
     ).not.toHaveBeenCalled();
   });
 
+  it("ignores a stale createOffer rejection", async () => {
+    const { connection } = await mountPlayer();
+    const firstPeer = MockRTCPeerConnection.instances[0];
+    let rejectOffer!: (reason?: unknown) => void;
+    firstPeer.createOffer.mockReturnValueOnce(
+      new Promise<RTCSessionDescriptionInit>((_resolve, reject) => {
+        rejectOffer = reject;
+      })
+    );
+
+    const negotiation = triggerNegotiation(firstPeer);
+    connection.ready();
+    await vi.waitFor(() =>
+      expect(MockRTCPeerConnection.instances).toHaveLength(2)
+    );
+
+    rejectOffer(new Error("stale peer"));
+    await expect(negotiation).resolves.toBeUndefined();
+  });
+
+  it("preserves an active createOffer rejection", async () => {
+    await mountPlayer();
+    const peer = MockRTCPeerConnection.instances[0];
+    const failure = new Error("offer failed");
+    peer.createOffer.mockRejectedValueOnce(failure);
+
+    await expect(triggerNegotiation(peer)).rejects.toBe(failure);
+  });
+
+  it("ignores a stale setLocalDescription rejection", async () => {
+    const { connection } = await mountPlayer();
+    const firstPeer = MockRTCPeerConnection.instances[0];
+    let rejectDescription!: (reason?: unknown) => void;
+    firstPeer.setLocalDescription.mockReturnValueOnce(
+      new Promise<void>((_resolve, reject) => {
+        rejectDescription = reject;
+      })
+    );
+
+    const negotiation = triggerNegotiation(firstPeer);
+    await vi.waitFor(() =>
+      expect(firstPeer.setLocalDescription).toHaveBeenCalledOnce()
+    );
+    connection.ready();
+    await vi.waitFor(() =>
+      expect(MockRTCPeerConnection.instances).toHaveLength(2)
+    );
+
+    rejectDescription(new Error("stale peer"));
+    await expect(negotiation).resolves.toBeUndefined();
+  });
+
+  it("preserves an active setLocalDescription rejection", async () => {
+    await mountPlayer();
+    const peer = MockRTCPeerConnection.instances[0];
+    const failure = new Error("description failed");
+    peer.setLocalDescription.mockRejectedValueOnce(failure);
+
+    await expect(triggerNegotiation(peer)).rejects.toBe(failure);
+  });
+
+  it("owns the offer subscription for the socket that started the stream", async () => {
+    const { connection, player } = await mountPlayer();
+    const peer = MockRTCPeerConnection.instances[0];
+    const expectedSocket = connection.socket;
+    const unsubscribe = createUnsubscribe();
+    webRtcOffer.mockResolvedValueOnce(unsubscribe);
+
+    await triggerNegotiation(peer);
+
+    expect(webRtcOffer).toHaveBeenCalledWith(
+      expect.anything(),
+      "camera.front",
+      "v=0\r\n",
+      expect.any(Function),
+      {
+        signal: expect.any(AbortSignal),
+        expectedSocket,
+      }
+    );
+
+    player.remove();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("reports an active offer subscription failure", async () => {
+    const { player } = await mountPlayer();
+    const peer = MockRTCPeerConnection.instances[0];
+    webRtcOffer.mockRejectedValueOnce(new Error("subscription failed"));
+
+    await triggerNegotiation(peer);
+    await player.updateComplete;
+
+    expect(player.shadowRoot?.textContent).toContain(
+      "Failed to start WebRTC stream: subscription failed"
+    );
+  });
+
+  it("disposes a stale subscription without clearing the replacement", async () => {
+    const { connection, player } = await mountPlayer();
+    const firstPeer = MockRTCPeerConnection.instances[0];
+    const staleUnsubscribe = createUnsubscribe();
+    let resolveFirst!: (unsubscribe: () => Promise<void>) => void;
+    webRtcOffer.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFirst = resolve;
+      })
+    );
+
+    const firstNegotiation = triggerNegotiation(firstPeer);
+    await vi.waitFor(() => expect(webRtcOffer).toHaveBeenCalledOnce());
+
+    connection.ready();
+    await vi.waitFor(() =>
+      expect(MockRTCPeerConnection.instances).toHaveLength(2)
+    );
+
+    const currentUnsubscribe = createUnsubscribe();
+    webRtcOffer.mockResolvedValueOnce(currentUnsubscribe);
+    await triggerNegotiation(MockRTCPeerConnection.instances[1]);
+
+    resolveFirst(staleUnsubscribe);
+    await firstNegotiation;
+
+    expect(staleUnsubscribe).toHaveBeenCalledOnce();
+    expect(currentUnsubscribe).not.toHaveBeenCalled();
+
+    player.remove();
+    expect(currentUnsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("does not report cancellation as an active offer failure", async () => {
+    const { connection, player } = await mountPlayer();
+    const firstPeer = MockRTCPeerConnection.instances[0];
+    webRtcOffer.mockImplementationOnce(
+      (_hass, _entityId, _offer, _callback, options: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () =>
+              reject(
+                new DOMException("WebRTC offer was cancelled", "AbortError")
+              ),
+            { once: true }
+          );
+        })
+    );
+
+    const negotiation = triggerNegotiation(firstPeer);
+    await vi.waitFor(() => expect(webRtcOffer).toHaveBeenCalledOnce());
+
+    connection.ready();
+    await expect(negotiation).resolves.toBeUndefined();
+    await player.updateComplete;
+
+    expect(player.shadowRoot?.textContent).not.toContain(
+      "Failed to start WebRTC stream"
+    );
+  });
+
   it("waits until the document is visible to restart", async () => {
     const { connection } = await mountPlayer();
     const firstPeer = MockRTCPeerConnection.instances[0];
     const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
 
-    connection.dispatchEvent(new Event("ready"));
+    connection.ready();
     await vi.waitFor(() => expect(firstPeer.close).toHaveBeenCalledOnce());
     expect(fetchWebRtcClientConfiguration).toHaveBeenCalledOnce();
 
