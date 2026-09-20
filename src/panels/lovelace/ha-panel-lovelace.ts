@@ -33,6 +33,7 @@ import type { HomeAssistant, PanelInfo, Route } from "../../types";
 import { showToast } from "../../util/toast";
 import { checkLovelaceConfig } from "./common/check-lovelace-config";
 import { loadLovelaceResources } from "./common/load-resources";
+import { shouldPreserveLovelaceConfig } from "./common/should-preserve-lovelace-config";
 import { showSaveDialog } from "./editor/show-save-config-dialog";
 import "./hui-root";
 import {
@@ -235,7 +236,7 @@ export class LovelacePanel extends LitElement {
   private _handleConnectionStatus = (ev) => {
     // reload lovelace on reconnect so we are sure we have the latest config
     if (ev.detail === "connected") {
-      this._fetchConfig(false);
+      this._fetchConfig(false, true);
     }
   };
 
@@ -288,7 +289,10 @@ export class LovelacePanel extends LitElement {
     this._fetchConfig(true);
   }
 
-  private async _fetchConfig(forceDiskRefresh: boolean) {
+  private async _fetchConfig(
+    forceDiskRefresh: boolean,
+    preserveIfUnchanged = false
+  ) {
     this._loading = true;
 
     let conf: LovelaceConfig;
@@ -376,7 +380,7 @@ export class LovelacePanel extends LitElement {
 
     this._panelState =
       this._panelState === "yaml-editor" ? this._panelState : "loaded";
-    this._setLovelaceConfig(conf, rawConf, confMode);
+    this._setLovelaceConfig(conf, rawConf, confMode, preserveIfUnchanged);
   }
 
   private _checkLovelaceConfig(config: LovelaceRawConfig) {
@@ -387,9 +391,22 @@ export class LovelacePanel extends LitElement {
   private _setLovelaceConfig(
     config: LovelaceConfig,
     rawConfig: LovelaceRawConfig,
-    mode: Lovelace["mode"]
+    mode: Lovelace["mode"],
+    preserveIfUnchanged = false
   ) {
     config = this._checkLovelaceConfig(config);
+    if (
+      preserveIfUnchanged &&
+      shouldPreserveLovelaceConfig(this.lovelace, {
+        config,
+        rawConfig,
+        mode,
+        urlPath: this.urlPath,
+        locale: this.hass!.locale,
+      })
+    ) {
+      return;
+    }
     const urlPath = this.urlPath;
     this.lovelace = {
       config,

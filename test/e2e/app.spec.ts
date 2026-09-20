@@ -4,7 +4,7 @@
  * Run with:
  *   yarn test:e2e:app
  */
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import {
   appSidebar,
   appSidebarConfig,
@@ -29,6 +29,18 @@ import {
   connectivityLinks,
   moreInfoViewElements,
 } from "./app/src/smoke";
+
+const waitForLovelaceFetch = async (page: Page) => {
+  const lovelace = page.locator("ha-panel-lovelace");
+  await expect
+    .poll(() =>
+      lovelace.evaluate((element) => !Reflect.get(element, "_loading"))
+    )
+    .toBe(true);
+  await lovelace.evaluate(async (element) => {
+    await Reflect.get(element, "updateComplete");
+  });
+};
 
 // ---------------------------------------------------------------------------
 // App shell
@@ -120,6 +132,61 @@ test.describe("App shell", () => {
       timeout: QUICK_TIMEOUT,
     });
   });
+});
+
+test("preserves iframe state when reconnect config is unchanged", async ({
+  page,
+}) => {
+  const errors = trackPageErrors(page);
+  await goToPanel(page, "/?scenario=reconnect-static-iframe#/lovelace");
+
+  const iframe = page.locator("hui-iframe-card iframe").first();
+  const frameInput = page
+    .frameLocator("hui-iframe-card iframe")
+    .locator("#preserved-value");
+  await expect(frameInput).toBeVisible({ timeout: PANEL_TIMEOUT });
+  await frameInput.fill("still here");
+  const originalIframe = await iframe.elementHandle();
+
+  await page.evaluate(() => {
+    window.deferLovelaceConfig?.();
+    window.dispatchEvent(
+      new CustomEvent("connection-status", { detail: "connected" })
+    );
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
+    .toBe(2);
+  await page.evaluate(() => window.resolveLovelaceConfig?.());
+  await waitForLovelaceFetch(page);
+
+  await expect(frameInput).toHaveValue("still here");
+  expect(await page.evaluate(() => window.__reconnectIframeLoads)).toBe(1);
+  expect(
+    await iframe.evaluate(
+      (element, original) => element === original,
+      originalIframe
+    )
+  ).toBe(true);
+
+  await page.evaluate(() => {
+    window.useChangedLovelaceConfig?.();
+    window.dispatchEvent(
+      new CustomEvent("connection-status", { detail: "connected" })
+    );
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.__reconnectIframeLoads))
+    .toBe(2);
+  await expect(frameInput).toHaveValue("");
+  expect(
+    await iframe.evaluate(
+      (element, original) => element !== original,
+      originalIframe
+    )
+  ).toBe(true);
+  await originalIframe?.dispose();
+  expectNoPageErrors(errors, undefined, []);
 });
 
 test.describe("Quick search", () => {
