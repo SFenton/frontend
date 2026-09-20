@@ -1,4 +1,5 @@
 import { expect, type Page, type WebSocketRoute } from "@playwright/test";
+import type { LovelaceRawConfig } from "../../../../src/data/lovelace/config/types";
 import { demoConfig } from "../../../../src/fake_data/demo_config";
 import { demoPanels } from "../../../../src/fake_data/demo_panels";
 import { PANEL_TIMEOUT, SHELL_TIMEOUT } from "../../helpers";
@@ -18,6 +19,39 @@ export interface OnboardingCalls {
   systemData?: Record<string, unknown>;
   integration?: Record<string, unknown>;
   tokenRequests: string[];
+}
+
+export interface OnboardingMockController extends OnboardingCalls {
+  closeActiveSocket: () => Promise<void>;
+  getAuthenticatedSocketCount: () => number;
+  getLovelaceConfigRequestCount: (urlPath: string | null) => number;
+  getLovelaceSubscriptionCount: () => number;
+  getSocketCount: () => number;
+  sendLovelaceUpdated: (urlPath: string | null) => void;
+  setLovelaceConfig: (
+    urlPath: string | null,
+    config: LovelaceRawConfig
+  ) => void;
+}
+
+interface OnboardingMockOptions {
+  lovelaceDashboard?: {
+    config: LovelaceRawConfig;
+    urlPath: string;
+  };
+}
+
+interface MockSocketSession {
+  authenticated: boolean;
+  socket: WebSocketRoute;
+  subscriptions: Map<number, string | undefined>;
+}
+
+interface OnboardingMockState {
+  configRequestCounts: Map<string, number>;
+  lovelaceConfigs: Map<string, LovelaceRawConfig>;
+  options: OnboardingMockOptions;
+  sessions: MockSocketSession[];
 }
 
 export const onboardingData = {
@@ -119,14 +153,19 @@ const sendResult = (socket: WebSocketRoute, id: number, result: unknown) => {
   );
 };
 
+const lovelaceConfigKey = (urlPath: string | null) => urlPath ?? "";
+
 const handleWebSocketMessage = (
   socket: WebSocketRoute,
   rawMessage: string | Buffer,
-  calls: OnboardingCalls
+  calls: OnboardingCalls,
+  session: MockSocketSession,
+  state: OnboardingMockState
 ) => {
   const message = JSON.parse(rawMessage.toString()) as WebSocketMessage;
 
   if (message.type === "auth") {
+    session.authenticated = true;
     socket.send(JSON.stringify({ type: "auth_ok", ha_version: "2026.8.0" }));
     return;
   }
@@ -144,10 +183,17 @@ const handleWebSocketMessage = (
   }
 
   if (message.type === "subscribe_events") {
+    session.subscriptions.set(
+      message.id,
+      typeof message.event_type === "string" ? message.event_type : undefined
+    );
     sendResult(socket, message.id, null);
     return;
   }
   if (message.type === "unsubscribe_events") {
+    if (typeof message.subscription === "number") {
+      session.subscriptions.delete(message.subscription);
+    }
     sendResult(socket, message.id, null);
     return;
   }
@@ -164,6 +210,37 @@ const handleWebSocketMessage = (
     return;
   }
 
+  if (message.type === "lovelace/config") {
+    const urlPath =
+      typeof message.url_path === "string" ? message.url_path : null;
+    const key = lovelaceConfigKey(urlPath);
+    state.configRequestCounts.set(
+      key,
+      (state.configRequestCounts.get(key) ?? 0) + 1
+    );
+    sendResult(
+      socket,
+      message.id,
+      state.lovelaceConfigs.get(key) ?? commandResults["lovelace/config"]
+    );
+    return;
+  }
+
+  if (message.type === "get_panels" && state.options.lovelaceDashboard) {
+    const { urlPath } = state.options.lovelaceDashboard;
+    sendResult(socket, message.id, {
+      lovelace: demoPanels.lovelace,
+      [urlPath]: {
+        component_name: "lovelace",
+        icon: "mdi:view-dashboard",
+        title: "Reconnect test",
+        config: { mode: "storage" },
+        url_path: urlPath,
+      },
+    });
+    return;
+  }
+
   if (message.type in commandResults) {
     sendResult(socket, message.id, commandResults[message.type]);
     return;
@@ -173,9 +250,81 @@ const handleWebSocketMessage = (
 };
 
 export async function setupOnboardingMocks(
-  page: Page
-): Promise<OnboardingCalls> {
+  page: Page,
+  options: OnboardingMockOptions = {}
+): Promise<OnboardingMockController> {
   const calls: OnboardingCalls = { tokenRequests: [] };
+  const state: OnboardingMockState = {
+    configRequestCounts: new Map(),
+    lovelaceConfigs: new Map(),
+    options,
+    sessions: [],
+  };
+  if (options.lovelaceDashboard) {
+    state.lovelaceConfigs.set(
+      lovelaceConfigKey(options.lovelaceDashboard.urlPath),
+      options.lovelaceDashboard.config
+    );
+  }
+  const activeSession = () =>
+    [...state.sessions].reverse().find((session) => session.authenticated);
+  const controller = Object.assign(calls, {
+    closeActiveSocket: async () => {
+      const session = activeSession();
+      if (!session) {
+        throw new Error("No authenticated Home Assistant WebSocket to close");
+      }
+      await session.socket.close({
+        code: 1001,
+        reason: "Reconnect lifecycle test",
+      });
+    },
+    getAuthenticatedSocketCount: () =>
+      state.sessions.filter((session) => session.authenticated).length,
+    getLovelaceConfigRequestCount: (urlPath: string | null) =>
+      state.configRequestCounts.get(lovelaceConfigKey(urlPath)) ?? 0,
+    getLovelaceSubscriptionCount: () => {
+      const session = activeSession();
+      return session
+        ? [...session.subscriptions.values()].filter(
+            (eventType) => eventType === "lovelace_updated"
+          ).length
+        : 0;
+    },
+    getSocketCount: () => state.sessions.length,
+    sendLovelaceUpdated: (urlPath: string | null) => {
+      const session = activeSession();
+      const subscriptions = session
+        ? [...session.subscriptions.entries()].find(
+            ([, eventType]) => eventType === "lovelace_updated"
+          )
+        : undefined;
+      if (!session || !subscriptions) {
+        throw new Error("No active Lovelace update subscription");
+      }
+      for (const [subscriptionId, eventType] of session.subscriptions) {
+        if (eventType !== "lovelace_updated") {
+          continue;
+        }
+        session.socket.send(
+          JSON.stringify({
+            id: subscriptionId,
+            type: "event",
+            event: {
+              event_type: "lovelace_updated",
+              data: { url_path: urlPath, mode: "storage" },
+              origin: "LOCAL",
+              time_fired: new Date().toISOString(),
+              context: { id: "test", parent_id: null, user_id: null },
+            },
+          })
+        );
+      }
+    },
+    setLovelaceConfig: (urlPath: string | null, config: LovelaceRawConfig) => {
+      state.lovelaceConfigs.set(lovelaceConfigKey(urlPath), config);
+    },
+  }) satisfies OnboardingMockController;
 
   // The location step shows a map. This app builds with __DEMO__ true, so its
   // tiles come from the demo upstreams; answering those here keeps CI off the
@@ -241,12 +390,18 @@ export async function setupOnboardingMocks(
   });
   await page.route("**/auth/revoke", (route) => route.fulfill({ status: 200 }));
   await page.routeWebSocket("**/api/websocket", (socket) => {
+    const session: MockSocketSession = {
+      authenticated: false,
+      socket,
+      subscriptions: new Map(),
+    };
+    state.sessions.push(session);
     socket.onMessage((message) =>
-      handleWebSocketMessage(socket, message, calls)
+      handleWebSocketMessage(socket, message, calls, session, state)
     );
   });
 
-  return calls;
+  return controller;
 }
 
 export async function openOnboarding(page: Page, baseURL: string) {
@@ -263,9 +418,11 @@ export async function openOnboarding(page: Page, baseURL: string) {
 }
 
 export async function createOwner(page: Page) {
-  await page
-    .locator("onboarding-welcome ha-button.start")
-    .click({ timeout: SHELL_TIMEOUT });
+  const startButton = page
+    .locator("onboarding-welcome")
+    .getByRole("button", { name: "Create my smart home", exact: true });
+  await expect(startButton).toBeVisible({ timeout: SHELL_TIMEOUT });
+  await startButton.click();
 
   const inputs = page.locator("onboarding-create-user ha-input >> input");
   await expect(inputs).toHaveCount(4, { timeout: PANEL_TIMEOUT });
@@ -318,7 +475,7 @@ export async function finishIntegrations(page: Page) {
 }
 
 export async function expectDefaultDashboard(page: Page) {
-  await expect(page).toHaveURL(/\/dashboard\.html#\/lovelace$/, {
+  await expect(page).toHaveURL(/\/dashboard\.html#\/lovelace(?:\/0)?$/, {
     timeout: PANEL_TIMEOUT,
   });
   await expect(page.locator("home-assistant")).toBeAttached({

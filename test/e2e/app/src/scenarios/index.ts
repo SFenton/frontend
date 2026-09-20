@@ -211,6 +211,112 @@ const delayedLovelaceScenario: Scenario = (hass) => {
   hass.mockWS("lovelace/config", () => configPromise);
 };
 
+class ReconnectSectionStrategy extends HTMLElement {
+  public static registryDependencies = [];
+
+  public static async generate() {
+    window.__reconnectSidebarGenerations =
+      (window.__reconnectSidebarGenerations ?? 0) + 1;
+    return {
+      cards: [
+        {
+          type: "markdown",
+          content: `Generation ${window.__reconnectSidebarGenerations}`,
+        },
+      ],
+    };
+  }
+}
+
+const reconnectStaticIframeScenario = (hass: MockHomeAssistant) => {
+  const iframeUrls = [1, 2].map((version) =>
+    URL.createObjectURL(
+      new Blob(
+        [
+          `<!doctype html><html><body><label>Preserved value <input id="preserved-value"></label><span>${version}</span><script>window.parent.__reconnectIframeLoads = (window.parent.__reconnectIframeLoads ?? 0) + 1;</script></body></html>`,
+        ],
+        { type: "text/html" }
+      )
+    )
+  );
+  let changed = false;
+  let deferNext = false;
+  window.__lovelaceReconnectFetches = 0;
+  window.__reconnectIframeLoads = 0;
+  window.deferLovelaceConfig = () => {
+    deferNext = true;
+  };
+  window.useChangedLovelaceConfig = () => {
+    changed = true;
+  };
+  hass.mockWS("lovelace/config", () => {
+    window.__lovelaceReconnectFetches =
+      (window.__lovelaceReconnectFetches ?? 0) + 1;
+    const config = structuredClone({
+      views: [
+        {
+          title: "Reconnect",
+          cards: [
+            {
+              type: "iframe",
+              url: iframeUrls[changed ? 1 : 0],
+              aspect_ratio: "100%",
+            },
+          ],
+        },
+      ],
+    } satisfies LovelaceRawConfig);
+    if (deferNext) {
+      deferNext = false;
+      return new Promise<LovelaceRawConfig>((resolve) => {
+        window.resolveLovelaceConfig = () => {
+          window.resolveLovelaceConfig = undefined;
+          resolve(config);
+        };
+      });
+    }
+    return config;
+  });
+};
+
+const reconnectSidebarStrategyScenario = (hass: MockHomeAssistant) => {
+  if (!customElements.get("ll-strategy-section-reconnect-probe")) {
+    customElements.define(
+      "ll-strategy-section-reconnect-probe",
+      ReconnectSectionStrategy
+    );
+  }
+
+  window.__lovelaceReconnectFetches = 0;
+  window.__reconnectSidebarGenerations = 0;
+  hass.mockWS("lovelace/config", () => {
+    window.__lovelaceReconnectFetches =
+      (window.__lovelaceReconnectFetches ?? 0) + 1;
+    return structuredClone({
+      views: [
+        {
+          title: "Reconnect",
+          type: "sections",
+          sections: [
+            {
+              type: "grid",
+              cards: [{ type: "markdown", content: "Main content" }],
+            },
+          ],
+          sidebar: {
+            sections: [
+              {
+                type: "grid",
+                strategy: { type: "custom:reconnect-probe" },
+              },
+            ],
+          },
+        },
+      ],
+    } satisfies LovelaceRawConfig);
+  });
+};
+
 const delayedGeneratedDashboardScenario: Scenario = (hass) => {
   addLaunchScreen();
 
@@ -381,4 +487,12 @@ export const scenarios: Record<string, Scenario> = {
   "weather-more-info": weatherMoreInfoScenario,
   "quick-search-assist": quickSearchAssistScenario,
   "delayed-lovelace": delayedLovelaceScenario,
+  "reconnect-static-iframe": reconnectStaticIframeScenario,
+  "reconnect-sidebar-strategy": reconnectSidebarStrategyScenario,
 };
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "ll-strategy-section-reconnect-probe": ReconnectSectionStrategy;
+  }
+}

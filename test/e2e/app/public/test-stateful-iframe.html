@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Stateful iframe test</title>
+  </head>
+  <body>
+    <label>Preserved value <input id="preserved-value" /></label>
+    <span id="version"></span>
+    <script>
+      document.querySelector("#version").textContent = new URLSearchParams(
+        window.location.search
+      ).get("version");
+      window.parent.__reconnectIframeLoads =
+        (window.parent.__reconnectIframeLoads ?? 0) + 1;
+    </script>
+  </body>
+</html>
