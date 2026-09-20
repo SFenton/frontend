@@ -211,24 +211,7 @@ const delayedLovelaceScenario: Scenario = (hass) => {
   hass.mockWS("lovelace/config", () => configPromise);
 };
 
-class ReconnectSectionStrategy extends HTMLElement {
-  public static registryDependencies = [];
-
-  public static async generate() {
-    window.__reconnectSidebarGenerations =
-      (window.__reconnectSidebarGenerations ?? 0) + 1;
-    return {
-      cards: [
-        {
-          type: "markdown",
-          content: `Generation ${window.__reconnectSidebarGenerations}`,
-        },
-      ],
-    };
-  }
-}
-
-const reconnectStaticIframeScenario = (hass: MockHomeAssistant) => {
+const reconnectStaticIframeScenario: Scenario = (hass) => {
   const iframeUrls = [1, 2].map((version) =>
     URL.createObjectURL(
       new Blob(
@@ -266,54 +249,16 @@ const reconnectStaticIframeScenario = (hass: MockHomeAssistant) => {
         },
       ],
     } satisfies LovelaceRawConfig);
-    if (deferNext) {
-      deferNext = false;
-      return new Promise<LovelaceRawConfig>((resolve) => {
-        window.resolveLovelaceConfig = () => {
-          window.resolveLovelaceConfig = undefined;
-          resolve(config);
-        };
-      });
+    if (!deferNext) {
+      return config;
     }
-    return config;
-  });
-};
-
-const reconnectSidebarStrategyScenario = (hass: MockHomeAssistant) => {
-  if (!customElements.get("ll-strategy-section-reconnect-probe")) {
-    customElements.define(
-      "ll-strategy-section-reconnect-probe",
-      ReconnectSectionStrategy
-    );
-  }
-
-  window.__lovelaceReconnectFetches = 0;
-  window.__reconnectSidebarGenerations = 0;
-  hass.mockWS("lovelace/config", () => {
-    window.__lovelaceReconnectFetches =
-      (window.__lovelaceReconnectFetches ?? 0) + 1;
-    return structuredClone({
-      views: [
-        {
-          title: "Reconnect",
-          type: "sections",
-          sections: [
-            {
-              type: "grid",
-              cards: [{ type: "markdown", content: "Main content" }],
-            },
-          ],
-          sidebar: {
-            sections: [
-              {
-                type: "grid",
-                strategy: { type: "custom:reconnect-probe" },
-              },
-            ],
-          },
-        },
-      ],
-    } satisfies LovelaceRawConfig);
+    deferNext = false;
+    return new Promise<LovelaceRawConfig>((resolve) => {
+      window.resolveLovelaceConfig = () => {
+        window.resolveLovelaceConfig = undefined;
+        resolve(config);
+      };
+    });
   });
 };
 
@@ -488,11 +433,4 @@ export const scenarios: Record<string, Scenario> = {
   "quick-search-assist": quickSearchAssistScenario,
   "delayed-lovelace": delayedLovelaceScenario,
   "reconnect-static-iframe": reconnectStaticIframeScenario,
-  "reconnect-sidebar-strategy": reconnectSidebarStrategyScenario,
 };
-
-declare global {
-  interface HTMLElementTagNameMap {
-    "ll-strategy-section-reconnect-probe": ReconnectSectionStrategy;
-  }
-}

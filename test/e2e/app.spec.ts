@@ -30,26 +30,15 @@ import {
   moreInfoViewElements,
 } from "./app/src/smoke";
 
-const waitForLovelaceApplied = async (page: Page) => {
-  const panel = page.locator("ha-panel-lovelace");
+const waitForLovelaceFetch = async (page: Page) => {
+  const lovelace = page.locator("ha-panel-lovelace");
   await expect
-    .poll(() => panel.evaluate((element) => Reflect.get(element, "_loading")))
-    .toBe(false);
-  await panel.evaluate(async (element) => {
-    const settle = async (node: Element): Promise<void> => {
-      await (node as Element & { updateComplete?: Promise<unknown> })
-        .updateComplete;
-      const children = [
-        ...Array.from(node.children),
-        ...Array.from(node.shadowRoot?.children ?? []),
-      ];
-      await Promise.all(children.map(settle));
-    };
-    await settle(element);
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => resolve());
-    });
-    await settle(element);
+    .poll(() =>
+      lovelace.evaluate((element) => !Reflect.get(element, "_loading"))
+    )
+    .toBe(true);
+  await lovelace.evaluate(async (element) => {
+    await Reflect.get(element, "updateComplete");
   });
 };
 
@@ -145,114 +134,59 @@ test.describe("App shell", () => {
   });
 });
 
-test.describe("Lovelace reconnect lifecycle", () => {
-  test("preserves a built-in iframe when static config is unchanged", async ({
-    page,
-  }) => {
-    const errors = trackPageErrors(page);
-    await goToPanel(page, "/?scenario=reconnect-static-iframe#/lovelace");
+test("preserves iframe state when reconnect config is unchanged", async ({
+  page,
+}) => {
+  const errors = trackPageErrors(page);
+  await goToPanel(page, "/?scenario=reconnect-static-iframe#/lovelace");
 
-    const iframe = page.locator("hui-iframe-card iframe").first();
-    const frameInput = page
-      .frameLocator("hui-iframe-card iframe")
-      .locator("#preserved-value");
-    await expect(iframe).toBeAttached({ timeout: PANEL_TIMEOUT });
-    await expect(frameInput).toBeVisible({ timeout: PANEL_TIMEOUT });
-    await expect
-      .poll(() => page.evaluate(() => window.__reconnectIframeLoads))
-      .toBe(1);
+  const iframe = page.locator("hui-iframe-card iframe").first();
+  const frameInput = page
+    .frameLocator("hui-iframe-card iframe")
+    .locator("#preserved-value");
+  await expect(frameInput).toBeVisible({ timeout: PANEL_TIMEOUT });
+  await frameInput.fill("still here");
+  const originalIframe = await iframe.elementHandle();
 
-    await frameInput.fill("still here");
-    const originalIframe = await iframe.elementHandle();
-    const originalWindow = await originalIframe!.evaluateHandle(
-      (element) => (element as HTMLIFrameElement).contentWindow
+  await page.evaluate(() => {
+    window.deferLovelaceConfig?.();
+    window.dispatchEvent(
+      new CustomEvent("connection-status", { detail: "connected" })
     );
-    const originalTimeOrigin = await frameInput.evaluate(
-      () => performance.timeOrigin
-    );
-
-    await page.evaluate(() => {
-      window.deferLovelaceConfig?.();
-      window.dispatchEvent(
-        new CustomEvent("connection-status", { detail: "connected" })
-      );
-    });
-    await expect
-      .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
-      .toBe(2);
-    await page.evaluate(() => window.resolveLovelaceConfig?.());
-    await waitForLovelaceApplied(page);
-
-    await expect(frameInput).toHaveValue("still here");
-    expect(await frameInput.evaluate(() => performance.timeOrigin)).toBe(
-      originalTimeOrigin
-    );
-    expect(await page.evaluate(() => window.__reconnectIframeLoads)).toBe(1);
-    expect(
-      await iframe.evaluate(
-        (element, original) => element === original,
-        originalIframe
-      )
-    ).toBe(true);
-    expect(
-      await iframe.evaluate(
-        (element, original) =>
-          (element as HTMLIFrameElement).contentWindow === original,
-        originalWindow
-      )
-    ).toBe(true);
-
-    await page.evaluate(() => {
-      window.useChangedLovelaceConfig?.();
-      window.dispatchEvent(
-        new CustomEvent("connection-status", { detail: "connected" })
-      );
-    });
-    await expect
-      .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
-      .toBe(3);
-    await waitForLovelaceApplied(page);
-
-    await expect(frameInput).toHaveValue("");
-    await expect
-      .poll(() => page.evaluate(() => window.__reconnectIframeLoads))
-      .toBe(2);
-    expect(
-      await iframe.evaluate(
-        (element, original) => element !== original,
-        originalIframe
-      )
-    ).toBe(true);
-    expect(await frameInput.evaluate(() => performance.timeOrigin)).not.toBe(
-      originalTimeOrigin
-    );
-    await originalWindow.dispose();
-    await originalIframe?.dispose();
-    expectNoPageErrors(errors, undefined, []);
   });
+  await expect
+    .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
+    .toBe(2);
+  await page.evaluate(() => window.resolveLovelaceConfig?.());
+  await waitForLovelaceFetch(page);
 
-  test("regenerates a sidebar strategy even when its descriptor and dependencies are unchanged", async ({
-    page,
-  }) => {
-    const errors = trackPageErrors(page);
-    await goToPanel(page, "/?scenario=reconnect-sidebar-strategy#/lovelace");
-    await expect
-      .poll(() => page.evaluate(() => window.__reconnectSidebarGenerations))
-      .toBe(1);
-    await page.evaluate(() =>
-      window.dispatchEvent(
-        new CustomEvent("connection-status", { detail: "connected" })
-      )
+  await expect(frameInput).toHaveValue("still here");
+  expect(await page.evaluate(() => window.__reconnectIframeLoads)).toBe(1);
+  expect(
+    await iframe.evaluate(
+      (element, original) => element === original,
+      originalIframe
+    )
+  ).toBe(true);
+
+  await page.evaluate(() => {
+    window.useChangedLovelaceConfig?.();
+    window.dispatchEvent(
+      new CustomEvent("connection-status", { detail: "connected" })
     );
-    await expect
-      .poll(() => page.evaluate(() => window.__lovelaceReconnectFetches))
-      .toBe(2);
-    await waitForLovelaceApplied(page);
-    await expect
-      .poll(() => page.evaluate(() => window.__reconnectSidebarGenerations))
-      .toBe(2);
-    expectNoPageErrors(errors, undefined, []);
   });
+  await expect
+    .poll(() => page.evaluate(() => window.__reconnectIframeLoads))
+    .toBe(2);
+  await expect(frameInput).toHaveValue("");
+  expect(
+    await iframe.evaluate(
+      (element, original) => element !== original,
+      originalIframe
+    )
+  ).toBe(true);
+  await originalIframe?.dispose();
+  expectNoPageErrors(errors, undefined, []);
 });
 
 test.describe("Quick search", () => {

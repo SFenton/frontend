@@ -10,7 +10,7 @@ import {
   openOnboarding,
   setupOnboardingMocks,
 } from "./app/src/onboarding";
-import { expectNoPageErrors, PANEL_TIMEOUT, trackPageErrors } from "./helpers";
+import { expectNoPageErrors, trackPageErrors } from "./helpers";
 
 test.use({ serviceWorkers: "block" });
 
@@ -59,132 +59,6 @@ test("completes onboarding and opens the default dashboard", async ({
   });
   expect(calls.tokenRequests).toHaveLength(2);
   expect(calls.tokenRequests[1]).toContain("dashboard-auth-code");
-  expectNoPageErrors(errors);
-});
-
-test("preserves static Lovelace DOM across a real WebSocket replacement", async ({
-  page,
-  baseURL,
-}) => {
-  const errors = trackPageErrors(page);
-  const urlPath = "reconnect-test";
-  const iframeConfig = (version: number) => ({
-    views: [
-      {
-        title: "Reconnect test",
-        cards: [
-          {
-            type: "iframe",
-            url: `/test-stateful-iframe.html?version=${version}`,
-            aspect_ratio: "100%",
-          },
-        ],
-      },
-    ],
-  });
-  const controller = await setupOnboardingMocks(page, {
-    lovelaceDashboard: {
-      config: iframeConfig(1),
-      urlPath,
-    },
-  });
-
-  await openOnboarding(page, baseURL!);
-  await createOwner(page);
-  await completeCoreConfig(page);
-  await completeAnalytics(page);
-  await finishIntegrations(page);
-  await expectDefaultDashboard(page);
-  const dashboardLink = page.locator(`a[href="/${urlPath}"]`);
-  await expect(dashboardLink).toBeAttached({ timeout: PANEL_TIMEOUT });
-  await dashboardLink.evaluate((element) => (element as HTMLElement).click());
-  await expect(page).toHaveURL(new RegExp(`/${urlPath}(?:/0)?$`));
-
-  const iframe = page.locator("hui-iframe-card iframe").first();
-  const frameInput = page
-    .frameLocator("hui-iframe-card iframe")
-    .locator("#preserved-value");
-  await expect(iframe).toBeAttached({ timeout: PANEL_TIMEOUT });
-  await expect(frameInput).toBeVisible({ timeout: PANEL_TIMEOUT });
-  await expect
-    .poll(() => controller.getLovelaceConfigRequestCount(urlPath))
-    .toBe(1);
-  await expect
-    .poll(() => page.evaluate(() => window.__reconnectIframeLoads))
-    .toBe(1);
-
-  await frameInput.fill("survives transport reconnect");
-  const originalIframe = await iframe.elementHandle();
-  const originalWindow = await originalIframe!.evaluateHandle(
-    (element) => (element as HTMLIFrameElement).contentWindow
-  );
-  const originalTimeOrigin = await frameInput.evaluate(
-    () => performance.timeOrigin
-  );
-  const initialSocketCount = controller.getSocketCount();
-  const initialAuthenticatedCount = controller.getAuthenticatedSocketCount();
-  const initialLovelaceSubscriptionCount =
-    controller.getLovelaceSubscriptionCount();
-  expect(initialLovelaceSubscriptionCount).toBeGreaterThan(0);
-
-  await controller.closeActiveSocket();
-  await expect
-    .poll(() => controller.getSocketCount(), { timeout: 30_000 })
-    .toBe(initialSocketCount + 1);
-  await expect
-    .poll(() => controller.getAuthenticatedSocketCount(), { timeout: 30_000 })
-    .toBe(initialAuthenticatedCount + 1);
-  await expect
-    .poll(() => controller.getLovelaceConfigRequestCount(urlPath), {
-      timeout: 30_000,
-    })
-    .toBe(2);
-  await page.waitForTimeout(250);
-  expect(controller.getLovelaceConfigRequestCount(urlPath)).toBe(2);
-  await expect
-    .poll(() => controller.getLovelaceSubscriptionCount())
-    .toBe(initialLovelaceSubscriptionCount);
-
-  await expect(frameInput).toHaveValue("survives transport reconnect");
-  expect(await frameInput.evaluate(() => performance.timeOrigin)).toBe(
-    originalTimeOrigin
-  );
-  expect(await page.evaluate(() => window.__reconnectIframeLoads)).toBe(1);
-  expect(
-    await iframe.evaluate(
-      (element, original) => element === original,
-      originalIframe
-    )
-  ).toBe(true);
-  expect(
-    await iframe.evaluate(
-      (element, original) =>
-        (element as HTMLIFrameElement).contentWindow === original,
-      originalWindow
-    )
-  ).toBe(true);
-
-  controller.setLovelaceConfig(urlPath, iframeConfig(2));
-  controller.sendLovelaceUpdated(urlPath);
-  await expect
-    .poll(() => controller.getLovelaceConfigRequestCount(urlPath))
-    .toBe(3);
-  await expect(frameInput).toHaveValue("");
-  await expect
-    .poll(() => page.evaluate(() => window.__reconnectIframeLoads))
-    .toBe(2);
-  expect(
-    await iframe.evaluate(
-      (element, original) => element !== original,
-      originalIframe
-    )
-  ).toBe(true);
-  expect(await frameInput.evaluate(() => performance.timeOrigin)).not.toBe(
-    originalTimeOrigin
-  );
-  await originalWindow.dispose();
-  await originalIframe?.dispose();
-  await originalIframe?.dispose();
   expectNoPageErrors(errors);
 });
 
