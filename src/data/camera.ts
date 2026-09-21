@@ -149,6 +149,7 @@ export const webRtcOffer = async (
     throw abortError();
   }
 
+  // The library does not reject an unacknowledged subscription on disconnect.
   let cancelled = false;
   let rejectCancellation!: (reason: DOMException) => void;
   const cancellation = new Promise<never>((_resolve, reject) => {
@@ -189,6 +190,7 @@ export const webRtcOffer = async (
         if (cleanup) {
           return cleanup;
         }
+        // The raw unsubscribe sends through the current Connection, whose IDs reset.
         if (!ownsSocket()) {
           return Promise.resolve();
         }

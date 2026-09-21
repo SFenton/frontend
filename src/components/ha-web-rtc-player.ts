@@ -156,11 +156,9 @@ class HaWebRtcPlayer extends LitElement {
     this._cleanUp();
   }
 
-  protected override willUpdate(changedProperties: PropertyValues) {
+  protected override willUpdate(changedProperties: PropertyValues<this>) {
     super.willUpdate(changedProperties);
-    if (changedProperties.has("_connection")) {
-      this._attachReadyListener();
-    }
+    this._attachReadyListener();
     if (!changedProperties.has("entityid")) {
       return;
     }
@@ -279,11 +277,11 @@ class HaWebRtcPlayer extends LitElement {
   }
 
   private _startNegotiation = async () => {
-    const peerConnection = this._peerConnection;
-    if (!peerConnection) {
+    if (!this._peerConnection) {
       return;
     }
 
+    const peerConnection = this._peerConnection;
     const startGeneration = this._startGeneration;
     const connection = this._startConnection;
     const expectedSocket = this._startSocket;
