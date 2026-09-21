@@ -1,5 +1,5 @@
 import { consume, type ContextType } from "@lit/context";
-import type { UnsubscribeFunc } from "home-assistant-js-websocket";
+import type { Connection, UnsubscribeFunc } from "home-assistant-js-websocket";
 import type { PropertyValues, TemplateResult } from "lit";
 import { css, html, LitElement } from "lit";
 import { customElement, property, query, state } from "lit/decorators";
@@ -18,6 +18,12 @@ import { apiContext, connectionContext } from "../data/context";
 import "./ha-alert";
 
 const HIDDEN_CLEANUP_DELAY = 60000;
+
+interface WebRtcStart {
+  connection: Connection;
+  socket: NonNullable<Connection["socket"]>;
+  peerConnection?: RTCPeerConnection;
+}
 
 /**
  * A WebRTC stream is established by first sending an offer through a signal
@@ -66,11 +72,19 @@ class HaWebRtcPlayer extends LitElement {
 
   private _unsub?: Promise<UnsubscribeFunc>;
 
+  private _start?: WebRtcStart;
+
+  private _negotiation?: object;
+
   private _sessionId?: string;
 
   private _candidatesList: RTCIceCandidate[] = [];
 
   private _hiddenCleanupTimeout?: number;
+
+  private _readyConnection?: Connection;
+
+  private _timerRunning = false;
 
   private _handleVisibilityChange = () => {
     if (document.pictureInPictureElement) {
@@ -89,6 +103,16 @@ class HaWebRtcPlayer extends LitElement {
     } else {
       this._startWebRtc();
     }
+  };
+
+  private _handleConnectionReady = () => {
+    if (document.hidden) {
+      clearTimeout(this._hiddenCleanupTimeout);
+      this._hiddenCleanupTimeout = undefined;
+      this._cleanUp();
+      return;
+    }
+    this._startWebRtc();
   };
 
   protected override render(): TemplateResult {
@@ -118,6 +142,7 @@ class HaWebRtcPlayer extends LitElement {
     if (this.hasUpdated && this.entityid) {
       this._startWebRtc();
     }
+    this._attachReadyListener();
     document.addEventListener("visibilitychange", this._handleVisibilityChange);
   }
 
@@ -127,6 +152,8 @@ class HaWebRtcPlayer extends LitElement {
       "visibilitychange",
       this._handleVisibilityChange
     );
+
+    this._detachReadyListener();
     clearTimeout(this._hiddenCleanupTimeout);
     this._hiddenCleanupTimeout = undefined;
     this._cleanUp();
@@ -134,10 +161,33 @@ class HaWebRtcPlayer extends LitElement {
 
   protected override willUpdate(changedProperties: PropertyValues<this>) {
     super.willUpdate(changedProperties);
+    this._attachReadyListener();
     if (!changedProperties.has("entityid")) {
       return;
     }
     this._startWebRtc();
+  }
+
+  private _attachReadyListener(): void {
+    const connection = this._connection?.connection;
+    if (
+      !this.isConnected ||
+      !connection ||
+      connection === this._readyConnection
+    ) {
+      return;
+    }
+    this._detachReadyListener();
+    connection.addEventListener("ready", this._handleConnectionReady);
+    this._readyConnection = connection;
+  }
+
+  private _detachReadyListener(): void {
+    this._readyConnection?.removeEventListener(
+      "ready",
+      this._handleConnectionReady
+    );
+    this._readyConnection = undefined;
   }
 
   private async _startWebRtc(): Promise<void> {
@@ -154,37 +204,64 @@ class HaWebRtcPlayer extends LitElement {
       return;
     }
 
+    const connection = this._connection.connection;
+    const expectedSocket = connection.socket;
+    if (!connection.connected || !expectedSocket) {
+      return;
+    }
+
+    const start: WebRtcStart = {
+      connection,
+      socket: expectedSocket,
+    };
+    this._start = start;
+
     this._error = undefined;
 
     this._startTimer();
 
     this._logEvent("start clientConfig");
 
-    this._clientConfig = await fetchWebRtcClientConfiguration(
-      this._api,
-      this.entityid
-    );
+    let clientConfig: WebRTCClientConfiguration;
+    try {
+      clientConfig = await fetchWebRtcClientConfiguration(
+        this._api,
+        this.entityid
+      );
+    } catch (err) {
+      if (!this._isCurrent(start)) {
+        return;
+      }
+      throw err;
+    }
+
+    if (!this._isCurrent(start)) {
+      return;
+    }
+
+    this._clientConfig = clientConfig;
 
     this._logEvent("end clientConfig", this._clientConfig);
 
-    this._peerConnection = new RTCPeerConnection(
+    const peerConnection = new RTCPeerConnection(
       this._clientConfig.configuration
     );
+    this._peerConnection = peerConnection;
+    start.peerConnection = peerConnection;
 
     if (this._clientConfig.dataChannel) {
       // Some cameras (such as nest) require a data channel to establish a stream
       // however, not used by any integrations.
-      this._peerConnection.createDataChannel(this._clientConfig.dataChannel);
+      peerConnection.createDataChannel(this._clientConfig.dataChannel);
     }
 
-    this._peerConnection.onnegotiationneeded = this._startNegotiation;
+    peerConnection.onnegotiationneeded = this._startNegotiation;
 
-    this._peerConnection.onicecandidate = this._handleIceCandidate;
-    this._peerConnection.oniceconnectionstatechange =
-      this._iceConnectionStateChanged;
+    peerConnection.onicecandidate = this._handleIceCandidate;
+    peerConnection.oniceconnectionstatechange = this._iceConnectionStateChanged;
 
     // just for debugging
-    this._peerConnection.onsignalingstatechange = (ev) => {
+    peerConnection.onsignalingstatechange = (ev) => {
       switch ((ev.target as RTCPeerConnection).signalingState) {
         case "stable":
           this._logEvent("ICE negotiation complete");
@@ -199,16 +276,29 @@ class HaWebRtcPlayer extends LitElement {
 
     // Setup callbacks to render remote stream once media tracks are discovered.
     this._remoteStream = new MediaStream();
-    this._peerConnection.ontrack = this._addTrack;
+    peerConnection.ontrack = this._addTrack;
 
-    this._peerConnection.addTransceiver("audio", { direction: "recvonly" });
-    this._peerConnection.addTransceiver("video", { direction: "recvonly" });
+    peerConnection.addTransceiver("audio", { direction: "recvonly" });
+    peerConnection.addTransceiver("video", { direction: "recvonly" });
   }
 
   private _startNegotiation = async () => {
     if (!this._peerConnection) {
       return;
     }
+
+    const start = this._start;
+    if (!start || !this._isCurrent(start)) {
+      return;
+    }
+
+    const peerConnection = this._peerConnection;
+
+    this._unsubscribeOffer();
+    const negotiation = {};
+    this._negotiation = negotiation;
+    const isCurrent = () =>
+      this._negotiation === negotiation && this._isCurrent(start);
 
     const offerOptions: RTCOfferOptions = {
       offerToReceiveAudio: true,
@@ -217,10 +307,17 @@ class HaWebRtcPlayer extends LitElement {
 
     this._logEvent("start createOffer", offerOptions);
 
-    const offer: RTCSessionDescriptionInit =
-      await this._peerConnection.createOffer(offerOptions);
+    let offer: RTCSessionDescriptionInit;
+    try {
+      offer = await peerConnection.createOffer(offerOptions);
+    } catch (err) {
+      if (!isCurrent()) {
+        return;
+      }
+      throw err;
+    }
 
-    if (!this._peerConnection) {
+    if (!isCurrent()) {
       return;
     }
 
@@ -228,9 +325,16 @@ class HaWebRtcPlayer extends LitElement {
 
     this._logEvent("start setLocalDescription");
 
-    await this._peerConnection.setLocalDescription(offer);
+    try {
+      await peerConnection.setLocalDescription(offer);
+    } catch (err) {
+      if (!isCurrent()) {
+        return;
+      }
+      throw err;
+    }
 
-    if (!this._peerConnection || !this.entityid) {
+    if (!isCurrent() || !this.entityid) {
       return;
     }
 
@@ -249,18 +353,39 @@ class HaWebRtcPlayer extends LitElement {
 
     this._logEvent("start webRtcOffer", offer_sdp);
 
-    try {
-      this._unsub = webRtcOffer(
-        this._connection,
-        this.entityid,
-        offer_sdp,
-        (event) => this._handleOfferEvent(event)
-      );
-    } catch (err: any) {
+    const subscription = webRtcOffer(
+      this._connection,
+      this.entityid,
+      offer_sdp,
+      (event) => {
+        if (isCurrent()) {
+          this._handleOfferEvent(event);
+        }
+      },
+      {
+        expectedSocket: start.socket,
+      }
+    );
+    this._unsub = subscription;
+    subscription.catch((err: any) => {
+      if (!isCurrent()) {
+        return;
+      }
       this._error = "Failed to start WebRTC stream: " + err.message;
       this._cleanUp();
-    }
+    });
   };
+
+  private _isCurrent(start: WebRtcStart): boolean {
+    return (
+      this.isConnected &&
+      this._start === start &&
+      this._connection?.connection === start.connection &&
+      start.connection.connected &&
+      start.connection.socket === start.socket &&
+      (!start.peerConnection || start.peerConnection === this._peerConnection)
+    );
+  }
 
   private _iceConnectionStateChanged = () => {
     this._logEvent(
@@ -383,6 +508,9 @@ class HaWebRtcPlayer extends LitElement {
   }
 
   private _cleanUp() {
+    this._start = undefined;
+    this._negotiation = undefined;
+
     if (this._remoteStream) {
       this._remoteStream.getTracks().forEach((track) => {
         track.stop();
@@ -410,12 +538,19 @@ class HaWebRtcPlayer extends LitElement {
       this._peerConnection = undefined;
 
       this._logEvent("stopped");
-      this._stopTimer();
     }
-    this._unsub?.then((unsub) => unsub());
-    this._unsub = undefined;
+    this._unsubscribeOffer();
     this._sessionId = undefined;
     this._candidatesList = [];
+    this._stopTimer();
+  }
+
+  private _unsubscribeOffer(): void {
+    const unsubscribe = this._unsub;
+    this._unsub = undefined;
+    if (unsubscribe) {
+      unsubscribe.then((unsub) => unsub()).catch(() => undefined);
+    }
   }
 
   private _loadedData() {
@@ -435,19 +570,21 @@ class HaWebRtcPlayer extends LitElement {
   }
 
   private _startTimer() {
-    if (!__DEV__) {
+    if (!__DEV__ || this._timerRunning) {
       return;
     }
     // eslint-disable-next-line no-console
     console.time("WebRTC");
+    this._timerRunning = true;
   }
 
   private _stopTimer() {
-    if (!__DEV__) {
+    if (!__DEV__ || !this._timerRunning) {
       return;
     }
     // eslint-disable-next-line no-console
     console.timeEnd("WebRTC");
+    this._timerRunning = false;
   }
 
   private _logEvent(msg: string, ...args: unknown[]) {

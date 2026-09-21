@@ -1,6 +1,8 @@
 import type {
+  Connection,
   HassEntityAttributeBase,
   HassEntityBase,
+  UnsubscribeFunc,
 } from "home-assistant-js-websocket";
 import { timeCacheEntityPromiseFunc } from "../common/util/time-cache-entity-promise-func";
 import type { HomeAssistant } from "../types";
@@ -124,17 +126,66 @@ export const fetchStreamUrl = async (
   return stream;
 };
 
+interface WebRtcOfferOptions {
+  expectedSocket: NonNullable<Connection["socket"]>;
+}
+
 export const webRtcOffer = (
   hass: Pick<HomeAssistant, "connection">,
   entity_id: string,
   offer: string,
-  callback: (event: WebRtcOfferEvent) => void
-) =>
-  hass.connection.subscribeMessage<WebRtcOfferEvent>(callback, {
-    type: "camera/webrtc/offer",
-    entity_id,
-    offer,
-  });
+  callback: (event: WebRtcOfferEvent) => void,
+  options: WebRtcOfferOptions
+): Promise<UnsubscribeFunc> => {
+  const connection = hass.connection;
+  const { expectedSocket } = options;
+  const ownsSocket = () =>
+    connection.connected && connection.socket === expectedSocket;
+
+  if (!ownsSocket()) {
+    return Promise.reject(
+      new DOMException("WebRTC offer belongs to a stale socket", "AbortError")
+    );
+  }
+
+  return connection
+    .subscribeMessage<WebRtcOfferEvent>(
+      (event) => {
+        if (ownsSocket()) {
+          callback(event);
+        }
+      },
+      {
+        type: "camera/webrtc/offer",
+        entity_id,
+        offer,
+      },
+      {
+        resubscribe: false,
+        preCheck: ownsSocket,
+      }
+    )
+    .then((unsubscribe) => {
+      let cleanup: Promise<void> | undefined;
+      const safeUnsubscribe = () => {
+        if (cleanup) {
+          return cleanup;
+        }
+        // The raw unsubscribe sends through the current Connection, whose IDs reset.
+        if (!ownsSocket()) {
+          return Promise.resolve();
+        }
+        cleanup = unsubscribe().catch((err) => {
+          if (ownsSocket()) {
+            throw err;
+          }
+        });
+        return cleanup;
+      };
+
+      return safeUnsubscribe;
+    });
+};
 
 export const addWebRtcCandidate = (
   hass: Pick<HomeAssistant, "callWS">,
