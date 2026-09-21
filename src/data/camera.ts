@@ -127,11 +127,10 @@ export const fetchStreamUrl = async (
 };
 
 interface WebRtcOfferOptions {
-  signal: AbortSignal;
   expectedSocket: NonNullable<Connection["socket"]>;
 }
 
-export const webRtcOffer = async (
+export const webRtcOffer = (
   hass: Pick<HomeAssistant, "connection">,
   entity_id: string,
   offer: string,
@@ -139,38 +138,20 @@ export const webRtcOffer = async (
   options: WebRtcOfferOptions
 ): Promise<UnsubscribeFunc> => {
   const connection = hass.connection;
-  const { expectedSocket, signal } = options;
+  const { expectedSocket } = options;
   const ownsSocket = () =>
     connection.connected && connection.socket === expectedSocket;
-  const abortError = () =>
-    new DOMException("WebRTC offer was cancelled", "AbortError");
 
-  if (signal.aborted || !ownsSocket()) {
-    throw abortError();
+  if (!ownsSocket()) {
+    return Promise.reject(
+      new DOMException("WebRTC offer belongs to a stale socket", "AbortError")
+    );
   }
 
-  // The library does not reject an unacknowledged subscription on disconnect.
-  let cancelled = false;
-  let rejectCancellation!: (reason: DOMException) => void;
-  const cancellation = new Promise<never>((_resolve, reject) => {
-    rejectCancellation = reject;
-  });
-  const cancel = () => {
-    if (cancelled) {
-      return;
-    }
-    cancelled = true;
-    rejectCancellation(abortError());
-  };
-
-  signal.addEventListener("abort", cancel, { once: true });
-  connection.addEventListener("disconnected", cancel);
-  expectedSocket.addEventListener("close", cancel, { once: true });
-
-  const subscription = connection
+  return connection
     .subscribeMessage<WebRtcOfferEvent>(
       (event) => {
-        if (!cancelled && !signal.aborted && ownsSocket()) {
+        if (ownsSocket()) {
           callback(event);
         }
       },
@@ -181,10 +162,10 @@ export const webRtcOffer = async (
       },
       {
         resubscribe: false,
-        preCheck: () => !cancelled && !signal.aborted && ownsSocket(),
+        preCheck: ownsSocket,
       }
     )
-    .then(async (unsubscribe) => {
+    .then((unsubscribe) => {
       let cleanup: Promise<void> | undefined;
       const safeUnsubscribe = () => {
         if (cleanup) {
@@ -202,31 +183,8 @@ export const webRtcOffer = async (
         return cleanup;
       };
 
-      if (cancelled || signal.aborted || !ownsSocket()) {
-        await safeUnsubscribe().catch(() => undefined);
-        throw abortError();
-      }
-
       return safeUnsubscribe;
     });
-
-  try {
-    return await Promise.race([subscription, cancellation]);
-  } catch (err) {
-    if (
-      cancelled ||
-      signal.aborted ||
-      !ownsSocket() ||
-      (err instanceof Error && err.message === "Pre-check failed")
-    ) {
-      throw abortError();
-    }
-    throw err;
-  } finally {
-    signal.removeEventListener("abort", cancel);
-    connection.removeEventListener("disconnected", cancel);
-    expectedSocket.removeEventListener("close", cancel);
-  }
 };
 
 export const addWebRtcCandidate = (

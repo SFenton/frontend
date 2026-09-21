@@ -19,6 +19,12 @@ import "./ha-alert";
 
 const HIDDEN_CLEANUP_DELAY = 60000;
 
+interface WebRtcStart {
+  connection: Connection;
+  socket: NonNullable<Connection["socket"]>;
+  peerConnection?: RTCPeerConnection;
+}
+
 /**
  * A WebRTC stream is established by first sending an offer through a signal
  * path via an integration. An answer is returned, then the rest of the stream
@@ -64,21 +70,17 @@ class HaWebRtcPlayer extends LitElement {
 
   private _remoteStream?: MediaStream;
 
-  private _unsub?: UnsubscribeFunc;
+  private _unsub?: Promise<UnsubscribeFunc>;
 
-  private _offerAbort?: AbortController;
+  private _start?: WebRtcStart;
+
+  private _negotiation?: object;
 
   private _sessionId?: string;
 
   private _candidatesList: RTCIceCandidate[] = [];
 
   private _hiddenCleanupTimeout?: number;
-
-  private _startGeneration = 0;
-
-  private _startConnection?: Connection;
-
-  private _startSocket?: NonNullable<Connection["socket"]>;
 
   private _readyConnection?: Connection;
 
@@ -150,6 +152,7 @@ class HaWebRtcPlayer extends LitElement {
       "visibilitychange",
       this._handleVisibilityChange
     );
+
     this._detachReadyListener();
     clearTimeout(this._hiddenCleanupTimeout);
     this._hiddenCleanupTimeout = undefined;
@@ -207,9 +210,11 @@ class HaWebRtcPlayer extends LitElement {
       return;
     }
 
-    const startGeneration = this._startGeneration;
-    this._startConnection = connection;
-    this._startSocket = expectedSocket;
+    const start: WebRtcStart = {
+      connection,
+      socket: expectedSocket,
+    };
+    this._start = start;
 
     this._error = undefined;
 
@@ -224,13 +229,13 @@ class HaWebRtcPlayer extends LitElement {
         this.entityid
       );
     } catch (err) {
-      if (!this._isCurrent(startGeneration, connection, expectedSocket)) {
+      if (!this._isCurrent(start)) {
         return;
       }
       throw err;
     }
 
-    if (!this._isCurrent(startGeneration, connection, expectedSocket)) {
+    if (!this._isCurrent(start)) {
       return;
     }
 
@@ -238,24 +243,25 @@ class HaWebRtcPlayer extends LitElement {
 
     this._logEvent("end clientConfig", this._clientConfig);
 
-    this._peerConnection = new RTCPeerConnection(
+    const peerConnection = new RTCPeerConnection(
       this._clientConfig.configuration
     );
+    this._peerConnection = peerConnection;
+    start.peerConnection = peerConnection;
 
     if (this._clientConfig.dataChannel) {
       // Some cameras (such as nest) require a data channel to establish a stream
       // however, not used by any integrations.
-      this._peerConnection.createDataChannel(this._clientConfig.dataChannel);
+      peerConnection.createDataChannel(this._clientConfig.dataChannel);
     }
 
-    this._peerConnection.onnegotiationneeded = this._startNegotiation;
+    peerConnection.onnegotiationneeded = this._startNegotiation;
 
-    this._peerConnection.onicecandidate = this._handleIceCandidate;
-    this._peerConnection.oniceconnectionstatechange =
-      this._iceConnectionStateChanged;
+    peerConnection.onicecandidate = this._handleIceCandidate;
+    peerConnection.oniceconnectionstatechange = this._iceConnectionStateChanged;
 
     // just for debugging
-    this._peerConnection.onsignalingstatechange = (ev) => {
+    peerConnection.onsignalingstatechange = (ev) => {
       switch ((ev.target as RTCPeerConnection).signalingState) {
         case "stable":
           this._logEvent("ICE negotiation complete");
@@ -270,10 +276,10 @@ class HaWebRtcPlayer extends LitElement {
 
     // Setup callbacks to render remote stream once media tracks are discovered.
     this._remoteStream = new MediaStream();
-    this._peerConnection.ontrack = this._addTrack;
+    peerConnection.ontrack = this._addTrack;
 
-    this._peerConnection.addTransceiver("audio", { direction: "recvonly" });
-    this._peerConnection.addTransceiver("video", { direction: "recvonly" });
+    peerConnection.addTransceiver("audio", { direction: "recvonly" });
+    peerConnection.addTransceiver("video", { direction: "recvonly" });
   }
 
   private _startNegotiation = async () => {
@@ -281,36 +287,18 @@ class HaWebRtcPlayer extends LitElement {
       return;
     }
 
-    const peerConnection = this._peerConnection;
-    const startGeneration = this._startGeneration;
-    const connection = this._startConnection;
-    const expectedSocket = this._startSocket;
-    if (
-      !connection ||
-      !expectedSocket ||
-      !this._isCurrent(
-        startGeneration,
-        connection,
-        expectedSocket,
-        peerConnection
-      )
-    ) {
+    const start = this._start;
+    if (!start || !this._isCurrent(start)) {
       return;
     }
 
-    this._offerAbort?.abort();
+    const peerConnection = this._peerConnection;
+
     this._unsubscribeOffer();
-    const offerAbort = new AbortController();
-    this._offerAbort = offerAbort;
+    const negotiation = {};
+    this._negotiation = negotiation;
     const isCurrent = () =>
-      this._offerAbort === offerAbort &&
-      !offerAbort.signal.aborted &&
-      this._isCurrent(
-        startGeneration,
-        connection,
-        expectedSocket,
-        peerConnection
-      );
+      this._negotiation === negotiation && this._isCurrent(start);
 
     const offerOptions: RTCOfferOptions = {
       offerToReceiveAudio: true,
@@ -365,46 +353,37 @@ class HaWebRtcPlayer extends LitElement {
 
     this._logEvent("start webRtcOffer", offer_sdp);
 
-    try {
-      const unsubscribe = await webRtcOffer(
-        this._connection,
-        this.entityid,
-        offer_sdp,
-        (event) => this._handleOfferEvent(event),
-        {
-          signal: offerAbort.signal,
-          expectedSocket,
+    const subscription = webRtcOffer(
+      this._connection,
+      this.entityid,
+      offer_sdp,
+      (event) => {
+        if (isCurrent()) {
+          this._handleOfferEvent(event);
         }
-      );
-      if (!isCurrent()) {
-        await unsubscribe();
-        return;
+      },
+      {
+        expectedSocket: start.socket,
       }
-      this._unsub = unsubscribe;
-    } catch (err: any) {
+    );
+    this._unsub = subscription;
+    subscription.catch((err: any) => {
       if (!isCurrent()) {
         return;
       }
       this._error = "Failed to start WebRTC stream: " + err.message;
       this._cleanUp();
-    }
+    });
   };
 
-  private _isCurrent(
-    startGeneration: number,
-    connection: Connection,
-    expectedSocket: NonNullable<Connection["socket"]>,
-    peerConnection?: RTCPeerConnection
-  ): boolean {
+  private _isCurrent(start: WebRtcStart): boolean {
     return (
       this.isConnected &&
-      startGeneration === this._startGeneration &&
-      this._startConnection === connection &&
-      this._startSocket === expectedSocket &&
-      this._connection?.connection === connection &&
-      connection.connected &&
-      connection.socket === expectedSocket &&
-      (!peerConnection || peerConnection === this._peerConnection)
+      this._start === start &&
+      this._connection?.connection === start.connection &&
+      start.connection.connected &&
+      start.connection.socket === start.socket &&
+      (!start.peerConnection || start.peerConnection === this._peerConnection)
     );
   }
 
@@ -529,11 +508,8 @@ class HaWebRtcPlayer extends LitElement {
   }
 
   private _cleanUp() {
-    this._startGeneration += 1;
-    this._startConnection = undefined;
-    this._startSocket = undefined;
-    this._offerAbort?.abort();
-    this._offerAbort = undefined;
+    this._start = undefined;
+    this._negotiation = undefined;
 
     if (this._remoteStream) {
       this._remoteStream.getTracks().forEach((track) => {
@@ -573,7 +549,7 @@ class HaWebRtcPlayer extends LitElement {
     const unsubscribe = this._unsub;
     this._unsub = undefined;
     if (unsubscribe) {
-      Promise.resolve(unsubscribe()).catch(() => undefined);
+      unsubscribe.then((unsub) => unsub()).catch(() => undefined);
     }
   }
 

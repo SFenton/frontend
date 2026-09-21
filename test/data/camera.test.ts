@@ -3,15 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { webRtcOffer } from "../../src/data/camera";
 import { FakeSocket } from "../test_helper/fake-socket";
 
-const abortOptions = (
-  socket: FakeSocket,
-  controller = new AbortController()
-) => ({
-  controller,
-  options: {
-    signal: controller.signal,
-    expectedSocket: socket.asWebSocket(),
-  },
+const offerOptions = (socket: FakeSocket) => ({
+  expectedSocket: socket.asWebSocket(),
 });
 
 afterEach(() => {
@@ -28,7 +21,6 @@ describe("webRtcOffer", () => {
       createSocket: async () => socket.asWebSocket(),
     });
     const subscribeMessage = vi.spyOn(connection, "subscribeMessage");
-    const { options } = abortOptions(socket);
     const callback = vi.fn();
 
     const unsubscribe = await webRtcOffer(
@@ -36,7 +28,7 @@ describe("webRtcOffer", () => {
       "camera.front",
       "offer",
       callback,
-      options
+      offerOptions(socket)
     );
 
     expect(subscribeMessage).toHaveBeenCalledWith(
@@ -65,7 +57,6 @@ describe("webRtcOffer", () => {
       setupRetry: 0,
       createSocket: async () => second.asWebSocket(),
     });
-    const { options } = abortOptions(first);
 
     connection.reconnect(true);
     await vi.runAllTimersAsync();
@@ -76,7 +67,7 @@ describe("webRtcOffer", () => {
         "camera.front",
         "stale offer",
         vi.fn(),
-        options
+        offerOptions(first)
       )
     ).rejects.toMatchObject({ name: "AbortError" });
     expect(
@@ -93,7 +84,6 @@ describe("webRtcOffer", () => {
       setupRetry: 0,
       createSocket: async () => second.asWebSocket(),
     });
-    const { options } = abortOptions(first);
 
     connection.reconnect(true);
 
@@ -103,7 +93,7 @@ describe("webRtcOffer", () => {
         "camera.front",
         "queued offer",
         vi.fn(),
-        options
+        offerOptions(first)
       )
     ).rejects.toMatchObject({ name: "AbortError" });
 
@@ -111,128 +101,6 @@ describe("webRtcOffer", () => {
     expect(
       second.sent.filter((message) => message.type === "camera/webrtc/offer")
     ).toEqual([]);
-    connection.close();
-  });
-
-  it("settles an unacknowledged offer when its socket disconnects", async () => {
-    vi.useFakeTimers();
-    const first = new FakeSocket();
-    first.deferredTypes.add("camera/webrtc/offer");
-    const second = new FakeSocket();
-    const connection = new Connection(first.asWebSocket(), {
-      setupRetry: 0,
-      createSocket: async () => second.asWebSocket(),
-    });
-    const { options } = abortOptions(first);
-    const pending = webRtcOffer(
-      { connection },
-      "camera.front",
-      "offer",
-      vi.fn(),
-      options
-    );
-    await vi.waitFor(() =>
-      expect(
-        first.sent.some((message) => message.type === "camera/webrtc/offer")
-      ).toBe(true)
-    );
-
-    connection.reconnect(true);
-
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    await vi.runAllTimersAsync();
-    expect(second.sent).toEqual([]);
-    connection.close();
-  });
-
-  it("settles an unacknowledged offer when the connection is closed", async () => {
-    const socket = new FakeSocket();
-    socket.deferredTypes.add("camera/webrtc/offer");
-    const connection = new Connection(socket.asWebSocket(), {
-      setupRetry: 0,
-      createSocket: async () => socket.asWebSocket(),
-    });
-    const { options } = abortOptions(socket);
-    const pending = webRtcOffer(
-      { connection },
-      "camera.front",
-      "offer",
-      vi.fn(),
-      options
-    );
-    await vi.waitFor(() =>
-      expect(
-        socket.sent.some((message) => message.type === "camera/webrtc/offer")
-      ).toBe(true)
-    );
-
-    connection.close();
-
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-  });
-
-  it("cleans up a same-socket late acknowledgement after cancellation", async () => {
-    const socket = new FakeSocket();
-    socket.deferredTypes.add("camera/webrtc/offer");
-    const connection = new Connection(socket.asWebSocket(), {
-      setupRetry: 0,
-      createSocket: async () => socket.asWebSocket(),
-    });
-    const { controller, options } = abortOptions(socket);
-    const callback = vi.fn();
-    const pending = webRtcOffer(
-      { connection },
-      "camera.front",
-      "offer",
-      callback,
-      options
-    );
-    await vi.waitFor(() =>
-      expect(
-        socket.sent.some((message) => message.type === "camera/webrtc/offer")
-      ).toBe(true)
-    );
-
-    controller.abort();
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-
-    socket.emitEvent(3, { type: "session", session_id: "stale" });
-    expect(callback).not.toHaveBeenCalled();
-
-    socket.acknowledge(3);
-    await vi.waitFor(() => expect(socket.subscriptions.size).toBe(0));
-    expect(
-      socket.sent.filter((message) => message.type === "unsubscribe_events")
-    ).toHaveLength(1);
-    connection.close();
-  });
-
-  it("consumes a late rejection after cancellation", async () => {
-    const socket = new FakeSocket();
-    socket.deferredTypes.add("camera/webrtc/offer");
-    const connection = new Connection(socket.asWebSocket(), {
-      setupRetry: 0,
-      createSocket: async () => socket.asWebSocket(),
-    });
-    const { controller, options } = abortOptions(socket);
-    const pending = webRtcOffer(
-      { connection },
-      "camera.front",
-      "offer",
-      vi.fn(),
-      options
-    );
-    await vi.waitFor(() =>
-      expect(
-        socket.sent.some((message) => message.type === "camera/webrtc/offer")
-      ).toBe(true)
-    );
-
-    controller.abort();
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-
-    socket.reject(3, "late failure");
-    await Promise.resolve();
     connection.close();
   });
 
@@ -247,13 +115,12 @@ describe("webRtcOffer", () => {
     await connection.sendMessagePromise({
       type: "camera/webrtc/get_client_config",
     });
-    const { options } = abortOptions(first);
     const unsubscribe = await webRtcOffer(
       { connection },
       "camera.front",
       "old offer",
       vi.fn(),
-      options
+      offerOptions(first)
     );
     await Promise.all(
       ["alpha", "beta", "gamma"].map((event) =>

@@ -346,12 +346,12 @@ describe("ha-web-rtc-player reconnect handling", () => {
       "v=0\r\n",
       expect.any(Function),
       {
-        signal: expect.any(AbortSignal),
         expectedSocket,
       }
     );
 
     player.remove();
+    await Promise.resolve();
     expect(unsubscribe).toHaveBeenCalledOnce();
   });
 
@@ -398,36 +398,8 @@ describe("ha-web-rtc-player reconnect handling", () => {
     expect(currentUnsubscribe).not.toHaveBeenCalled();
 
     player.remove();
+    await Promise.resolve();
     expect(currentUnsubscribe).toHaveBeenCalledOnce();
-  });
-
-  it("does not report cancellation as an active offer failure", async () => {
-    const { connection, player } = await mountPlayer();
-    const firstPeer = MockRTCPeerConnection.instances[0];
-    webRtcOffer.mockImplementationOnce(
-      (_hass, _entityId, _offer, _callback, options: { signal: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          options.signal.addEventListener(
-            "abort",
-            () =>
-              reject(
-                new DOMException("WebRTC offer was cancelled", "AbortError")
-              ),
-            { once: true }
-          );
-        })
-    );
-
-    const negotiation = triggerNegotiation(firstPeer);
-    await vi.waitFor(() => expect(webRtcOffer).toHaveBeenCalledOnce());
-
-    connection.ready();
-    await expect(negotiation).resolves.toBeUndefined();
-    await player.updateComplete;
-
-    expect(player.shadowRoot?.textContent).not.toContain(
-      "Failed to start WebRTC stream"
-    );
   });
 
   it("waits until the document is visible to restart", async () => {
